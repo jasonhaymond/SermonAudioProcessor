@@ -1,0 +1,51 @@
+{
+  "created_at": "2026-06-18T13:08:14",
+  "source_file": "/Users/jasonhaymond/Documents/SermonAudioProcessor/output/2024-09-08-Pastor-Ben-Matthew-28_16-20.mp3",
+  "bands": {
+    "low": {
+      "freq": 120.0,
+      "range": [
+        80.0,
+        200.0
+      ],
+      "q": 0.8,
+      "mean_db": -24.4
+    },
+    "low_mid": {
+      "freq": 300.0,
+      "range": [
+        200.0,
+        500.0
+      ],
+      "q": 0.9,
+      "mean_db": -19.3
+    },
+    "mid": {
+      "freq": 1000.0,
+      "range": [
+        500.0,
+        2000.0
+      ],
+      "q": 0.8,
+      "mean_db": -21.1
+    },
+    "presence": {
+      "freq": 3500.0,
+      "range": [
+        2000.0,
+        5000.0
+      ],
+      "q": 0.8,
+      "mean_db": -27.0
+    },
+    "high": {
+      "freq": 7500.0,
+      "range": [
+        5000.0,
+        10000.0
+      ],
+      "q": 0.7,
+      "mean_db": -32.5
+    }
+  }
+}
