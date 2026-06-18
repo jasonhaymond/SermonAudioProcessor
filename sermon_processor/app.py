@@ -22,11 +22,14 @@ stable, and cross-platform.
 
 import argparse
 import json
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -234,6 +237,12 @@ def build_pre_loudnorm_filters(cfg: Dict[str, Any]) -> list[str]:
     if hp:
         # Removes rumble, HVAC thumps, handling noise, and useless sub-bass.
         filters.append(f"highpass=f={float(hp)}")
+
+    if p.get("enable_noise_reduction", True):
+        # Noise Reduction
+        # Start around 6–10. Avoid going much above 12–15 unless the noise is terrible.
+        strength = p.get("noise_reduction_strength", 8)
+        filters.append(f"afftdn=nr={strength}")
 
     if p.get("enable_speech_eq", True):
         filters.extend([
@@ -509,37 +518,74 @@ def write_report(path: Path, report: Dict[str, Any]) -> None:
         json.dump(report, f, indent=2)
 
 
+
+def get_max_parallel_jobs(cfg: Dict[str, Any]) -> int:
+    """Return the configured number of file-level parallel jobs.
+
+    Config format expected by this version:
+
+        threads:
+          max_parallel_jobs: 2
+
+    This controls how many *files* may be processed at the same time. FFmpeg may
+    also use internal CPU threads for each file, so keep this value modest. Use
+    1 to make processing serial again.
+    """
+    try:
+        max_jobs = int(cfg.get("threads", {}).get("max_parallel_jobs", 1))
+    except (TypeError, ValueError):
+        max_jobs = 1
+
+    # Never allow less than one worker, even if the config is missing or invalid.
+    return max(1, max_jobs)
+
+
 # ---------------------------------------------------------------------------
 # Folder watcher and batch processing
 # ---------------------------------------------------------------------------
 
 class AudioFileHandler(FileSystemEventHandler):
-    """Watchdog event handler for newly-created or moved-in audio files."""
+    """Watchdog event handler for newly-created or moved-in audio files.
 
-    def __init__(self, folders: Folders, cfg: Dict[str, Any]):
+    The handler does not process files directly. Instead, it places stable files
+    onto a shared work queue. A fixed number of worker threads consume from that
+    queue. This prevents watcher mode from launching unlimited FFmpeg jobs if a
+    large batch of files is dropped into inbox/ at once.
+    """
+
+    def __init__(self, folders: Folders, cfg: Dict[str, Any], work_queue: "queue.Queue[Path]"):
         self.folders = folders
         self.cfg = cfg
+        self.work_queue = work_queue
         self.seen: set[Path] = set()
+        self.lock = threading.Lock()
 
     def on_created(self, event):  # type: ignore[override]
         if getattr(event, "is_directory", False):
             return
-        self._maybe_process(Path(event.src_path))
+        self._maybe_enqueue(Path(event.src_path))
 
     def on_moved(self, event):  # type: ignore[override]
         if getattr(event, "is_directory", False):
             return
-        self._maybe_process(Path(event.dest_path))
+        self._maybe_enqueue(Path(event.dest_path))
 
-    def _maybe_process(self, path: Path) -> None:
+    def _maybe_enqueue(self, path: Path) -> None:
+        """Add a supported, stable file to the queue once."""
         if not is_supported_input(path):
             return
-        if path in self.seen:
-            return
-        self.seen.add(path)
+
+        # Watchdog can send several events for the same file. Protect the seen
+        # set because watchdog callbacks can happen from different threads.
+        with self.lock:
+            if path in self.seen:
+                return
+            self.seen.add(path)
+
         w = self.cfg.get("watcher", {})
         if is_file_stable(path, int(w.get("file_stable_checks", 3)), float(w.get("file_stable_seconds", 2))):
-            process_file(path, self.folders, self.cfg)
+            print(f"Queued: {path.name}")
+            self.work_queue.put(path)
 
 
 def iter_inbox_audio_files(folders: Folders):
@@ -550,29 +596,114 @@ def iter_inbox_audio_files(folders: Folders):
 
 
 def process_existing_inbox(folders: Folders, cfg: Dict[str, Any]) -> None:
-    """Process all supported files that are already sitting in inbox/."""
-    for path in iter_inbox_audio_files(folders):
-        process_file(path, folders, cfg)
+    """Process all supported files that are already sitting in inbox/.
+
+    Batch mode uses file-level parallelism when threads.max_parallel_jobs is
+    greater than 1. Each job processes one source file from beginning to end.
+    """
+    files = list(iter_inbox_audio_files(folders))
+    if not files:
+        print("No supported audio files found in inbox.")
+        return
+
+    max_jobs = get_max_parallel_jobs(cfg)
+
+    if max_jobs == 1:
+        for path in files:
+            process_file(path, folders, cfg)
+        return
+
+    print(f"Processing {len(files)} file(s) with up to {max_jobs} parallel job(s).")
+
+    with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+        future_to_path = {
+            executor.submit(process_file, path, folders, cfg): path
+            for path in files
+        }
+
+        for future in as_completed(future_to_path):
+            path = future_to_path[future]
+            try:
+                future.result()
+            except Exception as exc:
+                # process_file normally handles its own failure reporting, but
+                # this catches unexpected exceptions so one bad file does not
+                # kill the whole batch.
+                print(f"FAILED THREAD JOB: {path.name}: {exc}", file=sys.stderr)
+
+
+
+def start_worker_pool(folders: Folders, cfg: Dict[str, Any]) -> tuple["queue.Queue[Optional[Path]]", list[threading.Thread]]:
+    """Start a fixed-size worker pool for watcher mode.
+
+    The watcher only detects files and places them on the queue. These worker
+    threads do the actual processing. This keeps CPU/disk usage bounded by
+    threads.max_parallel_jobs.
+    """
+    max_jobs = get_max_parallel_jobs(cfg)
+    work_queue: "queue.Queue[Optional[Path]]" = queue.Queue()
+    workers: list[threading.Thread] = []
+
+    def worker() -> None:
+        while True:
+            path = work_queue.get()
+            try:
+                # None is the shutdown signal used when Ctrl+C stops watcher mode.
+                if path is None:
+                    return
+                process_file(path, folders, cfg)
+            except Exception as exc:
+                name = path.name if isinstance(path, Path) else "unknown"
+                print(f"FAILED WORKER JOB: {name}: {exc}", file=sys.stderr)
+            finally:
+                work_queue.task_done()
+
+    for index in range(max_jobs):
+        thread = threading.Thread(target=worker, name=f"sermon-worker-{index + 1}", daemon=True)
+        thread.start()
+        workers.append(thread)
+
+    print(f"Worker pool started with {max_jobs} parallel job(s).")
+    return work_queue, workers
 
 
 def watch(folders: Folders, cfg: Dict[str, Any]) -> None:
     """Watch the inbox continuously until Ctrl+C."""
     if Observer is None:
         raise ProcessingError("watchdog is not installed. Run: pip install -r requirements.txt")
+
     print(f"Watching: {folders.inbox}")
     print(f"Supported inputs: {', '.join(sorted(SUPPORTED_INPUT_EXTENSIONS))}")
     print("Press Ctrl+C to stop.")
-    process_existing_inbox(folders, cfg)
-    handler = AudioFileHandler(folders, cfg)
+
+    # Start workers before scanning existing files so batch-at-start and newly
+    # dropped files share the same bounded queue.
+    work_queue, workers = start_worker_pool(folders, cfg)
+
+    # Queue files that were already in inbox/ before watcher mode started.
+    for path in iter_inbox_audio_files(folders):
+        print(f"Queued existing file: {path.name}")
+        work_queue.put(path)
+
+    handler = AudioFileHandler(folders, cfg, work_queue)  # type: ignore[arg-type]
     observer = Observer()
     observer.schedule(handler, str(folders.inbox), recursive=False)
     observer.start()
+
     try:
         while True:
             time.sleep(float(cfg.get("watcher", {}).get("poll_seconds", 3)))
     except KeyboardInterrupt:
+        print("Stopping watcher...")
         observer.stop()
-    observer.join()
+    finally:
+        observer.join()
+
+        # Ask each worker to stop after it finishes its current item.
+        for _ in workers:
+            work_queue.put(None)
+        work_queue.join()
+
 
 
 # ---------------------------------------------------------------------------

@@ -18,13 +18,25 @@ folders:
   reports: reports
   processing: processing
 
+threads:
+  # Number of concurrent processing threads.
+  # Number of files to process at the same time.
+  # Be cautious when increasing this value, as it can strain system resources.
+  # and can cause performance issues.
+  #
+  # Good starting values:
+  # [Default] MacBook Air: 2
+  # Strong Windows desktop: 3-4
+  # Use 1 to disable parallel processing.
+  max_parallel_jobs: 2
+
 processing:
   # Podcast-style spoken-word loudness target.
   # -16 LUFS is common for stereo podcast-style speech.
   target_lufs: -16.0
 
   # True peak ceiling. Leave headroom so MP3 conversion/playback does not clip.
-  true_peak_db: -1.5
+  true_peak_db: -1.0
 
   # Loudness range target. Lower = more even; higher = more natural dynamics.
   lra: 6.4
@@ -43,8 +55,14 @@ processing:
   presence_boost_q: 1.0
   presence_boost_db: 1.2
 
+  # Noise Reduction settings.
+  enable_noise_reduction: true
+  noise_reduction_strength: 8
+
   # Gentle speech compression before loudness normalization.
   enable_compression: true
+
+  # Start around -24dB. Adjust as needed based on the source material.
   compressor_threshold: -24dB
   compressor_ratio: 2.5
   compressor_attack_ms: 1
