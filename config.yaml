@@ -43,9 +43,9 @@ threads:
 eq_match:
   enabled: true
   reference_profile: reference_profiles/standard_sermon.json
-  max_boost_db: 5.0
-  max_cut_db: -7.0
-  min_change_db: 0.5
+  max_boost_db: 14.0
+  max_cut_db: -14.0
+  min_change_db: 0.1
   bands:
     low:
       freq: 120
@@ -71,7 +71,7 @@ eq_match:
 processing:
   # Podcast-style spoken-word loudness target.
   # -16 LUFS is common for stereo podcast-style speech.
-  target_lufs: -16.0
+  target_lufs: -15.0
 
   # True peak ceiling. Leave headroom so MP3 conversion/playback does not clip.
   true_peak_db: -1.0
@@ -85,7 +85,7 @@ processing:
 
   # Safe spoken-word cleanup. Start gentle, then tune after listening tests.
   highpass_hz: 90
-  enable_speech_eq: true
+  enable_speech_eq: false
   mud_cut_hz: 250
   mud_cut_q: 1.0
   mud_cut_db: -2.5
@@ -95,17 +95,17 @@ processing:
 
   # Noise Reduction settings.
   enable_noise_reduction: true
-  noise_reduction_strength: 9
+  noise_reduction_strength: 7
 
   # Gentle speech compression before loudness normalization.
   enable_compression: true
 
   # Start around -24dB. Adjust as needed based on the source material.
   compressor_threshold: -24dB
-  compressor_ratio: 2.4
+  compressor_ratio: 2.3
   compressor_attack_ms: 1
   compressor_release_ms: 150
-  compressor_makeup_db: 2.4
+  compressor_makeup_db: 2.1
 
   # Add short fades to clean up hard starts/stops and edge clicks.
   enable_fades: true
