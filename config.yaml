@@ -57,17 +57,17 @@ processing:
 
   # Noise Reduction settings.
   enable_noise_reduction: true
-  noise_reduction_strength: 8
+  noise_reduction_strength: 9
 
   # Gentle speech compression before loudness normalization.
   enable_compression: true
 
   # Start around -24dB. Adjust as needed based on the source material.
   compressor_threshold: -24dB
-  compressor_ratio: 2.5
+  compressor_ratio: 2.4
   compressor_attack_ms: 1
   compressor_release_ms: 150
-  compressor_makeup_db: 2.5
+  compressor_makeup_db: 2.4
 
   # Add short fades to clean up hard starts/stops and edge clicks.
   enable_fades: true
