@@ -43,8 +43,8 @@ threads:
 eq_match:
   enabled: true
   reference_profile: reference_profiles/standard_sermon.json
-  max_boost_db: 3.0
-  max_cut_db: -4.0
+  max_boost_db: 5.0
+  max_cut_db: -7.0
   min_change_db: 0.5
   bands:
     low:
