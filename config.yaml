@@ -17,6 +17,7 @@ folders:
   failed: failed
   reports: reports
   processing: processing
+  reference_profiles: reference_profiles
 
 threads:
   # Number of concurrent processing threads.
@@ -29,6 +30,43 @@ threads:
   # Strong Windows desktop: 3-4
   # Use 1 to disable parallel processing.
   max_parallel_jobs: 2
+
+
+# Optional broad-band EQ reference matching.
+# Workflow:
+#   1. Pick a good-sounding sermon.
+#   2. Run: python -m sermon_processor --make-reference "/path/to/good_sermon.mp3"
+#   3. Set enabled: true after you have listened/tested.
+#
+# This compares low/mid/high tone bands against a saved reference profile and
+# applies capped EQ correction. Keep the caps modest to avoid unnatural speech.
+eq_match:
+  enabled: false
+  reference_profile: reference_profiles/standard_sermon.json
+  max_boost_db: 2.5
+  max_cut_db: -3.5
+  min_change_db: 0.5
+  bands:
+    low:
+      freq: 120
+      range: [80, 200]
+      q: 0.8
+    low_mid:
+      freq: 300
+      range: [200, 500]
+      q: 0.9
+    mid:
+      freq: 1000
+      range: [500, 2000]
+      q: 0.8
+    presence:
+      freq: 3500
+      range: [2000, 5000]
+      q: 0.8
+    high:
+      freq: 7500
+      range: [5000, 10000]
+      q: 0.7
 
 processing:
   # Podcast-style spoken-word loudness target.

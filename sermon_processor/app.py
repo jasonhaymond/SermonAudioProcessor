@@ -66,6 +66,7 @@ class Folders:
     failed: Path
     reports: Path
     processing: Path
+    reference_profiles: Path
 
 
 class ProcessingError(RuntimeError):
@@ -111,6 +112,7 @@ def resolve_folders(config_path: Path, config: Dict[str, Any]) -> Folders:
         failed=p("failed"),
         reports=p("reports"),
         processing=p("processing"),
+        reference_profiles=p("reference_profiles"),
     )
 
 
@@ -223,7 +225,181 @@ def read_loudnorm_json(stderr: str) -> Dict[str, Any]:
     return json.loads(raw)
 
 
-def build_pre_loudnorm_filters(cfg: Dict[str, Any]) -> list[str]:
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    """Clamp a numeric value between a minimum and maximum."""
+    return max(minimum, min(maximum, value))
+
+
+def resolve_reference_profile_path(folders: Folders, cfg: Dict[str, Any]) -> Path:
+    """Return the configured EQ-match reference profile path.
+
+    A relative path is resolved from the project root. This allows config values
+    such as reference_profiles/standard_sermon.json to work on macOS, Windows,
+    and Linux without hard-coded absolute paths.
+    """
+    eq_cfg = cfg.get("eq_match", {})
+    profile_value = eq_cfg.get("reference_profile", "reference_profiles/standard_sermon.json")
+    profile_path = Path(profile_value)
+    if not profile_path.is_absolute():
+        profile_path = folders.root / profile_path
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    return profile_path
+
+
+def get_eq_match_bands(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return configured broad EQ-match bands, with safe defaults.
+
+    Each band is intentionally broad. For sermons, broad tone correction is much
+    safer than trying to match dozens of narrow EQ points, which can make speech
+    sound unnatural or phasey.
+    """
+    defaults = {
+        "low": {"freq": 120, "range": [80, 200], "q": 0.8},
+        "low_mid": {"freq": 300, "range": [200, 500], "q": 0.9},
+        "mid": {"freq": 1000, "range": [500, 2000], "q": 0.8},
+        "presence": {"freq": 3500, "range": [2000, 5000], "q": 0.8},
+        "high": {"freq": 7500, "range": [5000, 10000], "q": 0.7},
+    }
+    configured = cfg.get("eq_match", {}).get("bands") or {}
+    merged: Dict[str, Dict[str, Any]] = {}
+    for name, default_band in defaults.items():
+        band = dict(default_band)
+        if isinstance(configured.get(name), dict):
+            band.update(configured[name])
+        merged[name] = band
+    return merged
+
+
+def measure_band_mean_volume(input_file: Path, center_freq: float, low_freq: float, high_freq: float) -> Optional[float]:
+    """Measure approximate mean dB level for one broad frequency band.
+
+    This uses FFmpeg's bandpass filter followed by volumedetect. It is not a
+    laboratory-grade spectral analyzer, but it is practical, dependency-free,
+    and good enough for broad low/mid/high sermon tone matching.
+    """
+    width_hz = max(1.0, float(high_freq) - float(low_freq))
+    filter_chain = f"bandpass=f={float(center_freq)}:width_type=h:width={width_hz},volumedetect"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-y", "-i", str(input_file),
+        "-vn", "-af", filter_chain, "-f", "null", "-"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ProcessingError("FFmpeg EQ-band analysis failed:\n" + result.stderr[-4000:])
+
+    # volumedetect writes lines like: mean_volume: -24.3 dB
+    match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def analyze_eq_profile(input_file: Path, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Analyze broad-band tonal balance for an audio file."""
+    bands = get_eq_match_bands(cfg)
+    measured: Dict[str, Any] = {}
+    for name, band in bands.items():
+        band_range = band.get("range", [80, 200])
+        low_freq = float(band_range[0])
+        high_freq = float(band_range[1])
+        center_freq = float(band.get("freq", (low_freq + high_freq) / 2))
+        measured[name] = {
+            "freq": center_freq,
+            "range": [low_freq, high_freq],
+            "q": float(band.get("q", 0.8)),
+            "mean_db": measure_band_mean_volume(input_file, center_freq, low_freq, high_freq),
+        }
+
+    return {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "source_file": str(input_file),
+        "bands": measured,
+    }
+
+
+def write_eq_reference_profile(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Path:
+    """Create/update the configured EQ-match reference profile from one good file."""
+    if not is_supported_input(input_file):
+        raise ProcessingError(f"Unsupported reference file type: {input_file}")
+    profile = analyze_eq_profile(input_file, cfg)
+    profile_path = resolve_reference_profile_path(folders, cfg)
+    with profile_path.open("w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2)
+    return profile_path
+
+
+def build_eq_match_filters(input_file: Path, folders: Folders, cfg: Dict[str, Any], report: Optional[Dict[str, Any]] = None) -> list[str]:
+    """Create capped corrective EQ filters to move a file toward a reference profile.
+
+    The correction is intentionally limited. If a file is very different from the
+    reference, this will improve consistency without forcing extreme boosts/cuts.
+    """
+    eq_cfg = cfg.get("eq_match", {})
+    if not eq_cfg.get("enabled", False):
+        return []
+
+    profile_path = resolve_reference_profile_path(folders, cfg)
+    if not profile_path.exists():
+        message = f"EQ match enabled, but reference profile does not exist: {profile_path}"
+        if report is not None:
+            report["eq_match"] = {"enabled": True, "status": "skipped", "reason": message}
+        print(message, file=sys.stderr)
+        return []
+
+    with profile_path.open("r", encoding="utf-8") as f:
+        reference_profile = json.load(f)
+
+    current_profile = analyze_eq_profile(input_file, cfg)
+    max_boost = float(eq_cfg.get("max_boost_db", 2.5))
+    max_cut = float(eq_cfg.get("max_cut_db", -3.5))
+    min_change = float(eq_cfg.get("min_change_db", 0.5))
+
+    filters: list[str] = []
+    corrections: Dict[str, Any] = {}
+    reference_bands = reference_profile.get("bands", {})
+    current_bands = current_profile.get("bands", {})
+
+    for name, current in current_bands.items():
+        reference = reference_bands.get(name)
+        if not reference:
+            continue
+        current_db = current.get("mean_db")
+        reference_db = reference.get("mean_db")
+        if current_db is None or reference_db is None:
+            continue
+
+        # If current is lower than reference, gain is positive. If current is
+        # higher than reference, gain is negative. Then cap it for safety.
+        raw_gain = float(reference_db) - float(current_db)
+        gain = clamp(raw_gain, max_cut, max_boost)
+        if abs(gain) < min_change:
+            gain = 0.0
+
+        freq = float(current.get("freq", reference.get("freq", 1000)))
+        q = float(current.get("q", reference.get("q", 0.8)))
+        corrections[name] = {
+            "reference_mean_db": reference_db,
+            "current_mean_db": current_db,
+            "raw_gain_db": round(raw_gain, 3),
+            "applied_gain_db": round(gain, 3),
+            "freq": freq,
+            "q": q,
+        }
+        if gain != 0.0:
+            filters.append(f"equalizer=f={freq}:t=q:w={q}:g={gain}")
+
+    if report is not None:
+        report["eq_match"] = {
+            "enabled": True,
+            "status": "applied" if filters else "no_change_needed",
+            "reference_profile": str(profile_path),
+            "corrections": corrections,
+        }
+
+    return filters
+
+
+def build_pre_loudnorm_filters(cfg: Dict[str, Any], eq_match_filters: Optional[list[str]] = None) -> list[str]:
     """Build the audio filter chain used before loudness normalization.
 
     Keep this section conservative. It is better for archival sermon processing
@@ -243,6 +419,11 @@ def build_pre_loudnorm_filters(cfg: Dict[str, Any]) -> list[str]:
         # Start around 6–10. Avoid going much above 12–15 unless the noise is terrible.
         strength = p.get("noise_reduction_strength", 8)
         filters.append(f"afftdn=nr={strength}")
+
+    # Optional reference-based EQ matching. These filters are calculated per file
+    # before loudness normalization, then reused for both loudnorm passes.
+    if eq_match_filters:
+        filters.extend(eq_match_filters)
 
     if p.get("enable_speech_eq", True):
         filters.extend([
@@ -278,10 +459,10 @@ def build_pre_loudnorm_filters(cfg: Dict[str, Any]) -> list[str]:
     return filters
 
 
-def first_pass_loudnorm(input_file: Path, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def first_pass_loudnorm(input_file: Path, cfg: Dict[str, Any], eq_match_filters: Optional[list[str]] = None) -> Dict[str, Any]:
     """Run FFmpeg loudnorm first pass and return measured loudness data."""
     p = cfg["processing"]
-    filters = build_pre_loudnorm_filters(cfg)
+    filters = build_pre_loudnorm_filters(cfg, eq_match_filters)
     filters.append(
         f"loudnorm=I={p['target_lufs']}:TP={p['true_peak_db']}:LRA={p['lra']}:print_format=json"
     )
@@ -300,10 +481,10 @@ def db_to_linear(db_value: float) -> float:
     return 10 ** (db_value / 20.0)
 
 
-def second_pass_process(input_file: Path, output_file: Path, analysis: Dict[str, Any], cfg: Dict[str, Any]) -> None:
+def second_pass_process(input_file: Path, output_file: Path, analysis: Dict[str, Any], cfg: Dict[str, Any], eq_match_filters: Optional[list[str]] = None) -> None:
     """Run the real processing pass and encode the final MP3."""
     p = cfg["processing"]
-    filters = build_pre_loudnorm_filters(cfg)
+    filters = build_pre_loudnorm_filters(cfg, eq_match_filters)
     filters.append(
         "loudnorm="
         f"I={p['target_lufs']}:TP={p['true_peak_db']}:LRA={p['lra']}:"
@@ -451,10 +632,15 @@ def process_file(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Opt
         # without interrupting the active encode.
         shutil.copy2(input_file, work_input)
 
-        analysis = first_pass_loudnorm(work_input, cfg)
+        # Analyze this file against the optional broad-band EQ reference profile.
+        # The generated equalizer filters are reused in both loudnorm passes so
+        # analysis and final processing are consistent.
+        eq_match_filters = build_eq_match_filters(work_input, folders, cfg, report)
+
+        analysis = first_pass_loudnorm(work_input, cfg, eq_match_filters)
         report["loudnorm_analysis"] = analysis
 
-        second_pass_process(work_input, work_output, analysis, cfg)
+        second_pass_process(work_input, work_output, analysis, cfg, eq_match_filters)
         copy_or_create_id3_tags(work_input, work_output, cfg)
 
         final_output = output_file if not output_file.exists() else unique_path(output_file)
@@ -718,6 +904,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--watch", action="store_true", help="Watch inbox folder continuously")
     parser.add_argument("--batch", action="store_true", help="Process all supported audio files currently in inbox")
     parser.add_argument("--file", help="Process one supported audio file")
+    parser.add_argument("--make-reference", help="Analyze one good sermon and save the EQ-match reference profile")
     parser.add_argument("--check", action="store_true", help="Check dependencies and folders")
     args = parser.parse_args(argv)
 
@@ -731,8 +918,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("FFmpeg and ffprobe found.")
             print(f"Project root: {folders.root}")
             print(f"Supported inputs: {', '.join(sorted(SUPPORTED_INPUT_EXTENSIONS))}")
-            for name in ("inbox", "output", "originals", "failed", "reports", "processing"):
+            for name in ("inbox", "output", "originals", "failed", "reports", "processing", "reference_profiles"):
                 print(f"{name}: {getattr(folders, name)}")
+            print(f"EQ reference profile: {resolve_reference_profile_path(folders, cfg)}")
+            return 0
+        if args.make_reference:
+            profile_path = write_eq_reference_profile(Path(args.make_reference).resolve(), folders, cfg)
+            print(f"EQ reference profile written: {profile_path}")
             return 0
         if args.file:
             process_file(Path(args.file).resolve(), folders, cfg)

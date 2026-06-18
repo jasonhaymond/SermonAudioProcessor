@@ -4,7 +4,7 @@ A cross-platform Python + FFmpeg tool for automatically reprocessing spoken-word
 
 ## Current version
 
-Version 1.3 changes:
+Version 1.4 changes:
 
 - Supports `.mp3`, `.wav`, `.wave`, `.w64`, and `.wav64` originals.
 - Always outputs `.mp3` files.
@@ -19,6 +19,10 @@ Version 1.3 changes:
 - Added `archive_move_originals: true` default behavior: after a successful process, the original source is moved to `originals/` so `inbox/` stays clean.
 - Added configurable 0.5-second fade-in and fade-out by default using `enable_fades: true` and `fade_seconds: 0.5`.
 
+- Added optional broad-band EQ reference matching with `eq_match` settings.
+- Added `--make-reference` to analyze a good sermon and save `reference_profiles/standard_sermon.json`.
+- Added a `reference_profiles/` folder for saved tone standards.
+
 ## What it does
 
 Drop supported audio files into `inbox/` and the app will:
@@ -28,6 +32,8 @@ Drop supported audio files into `inbox/` and the app will:
 3. Analyze loudness using FFmpeg's two-pass `loudnorm` workflow.
 4. Apply a gentle spoken-word cleanup chain:
    - 80 Hz high-pass filter
+   - optional noise reduction
+   - optional broad-band EQ matching to a saved reference sermon
    - light mud reduction around 250 Hz
    - light intelligibility lift around 3.5 kHz
    - gentle compression
@@ -86,6 +92,7 @@ sermon_audio_processor/
   failed/         Files moved here if processing fails
   processing/     Temporary working files
   reports/        Per-file JSON analysis/process reports
+  reference_profiles/ Saved EQ-match reference tone profiles
   config.yaml     Main tuning and folder configuration
 ```
 
@@ -357,6 +364,12 @@ Check setup:
 
 ```bash
 python -m sermon_processor --check
+```
+
+Create/update the EQ-match reference profile from a good-sounding sermon:
+
+```bash
+python -m sermon_processor --make-reference "/path/to/good_sermon.mp3"
 ```
 
 Process everything currently in `inbox/` once:
@@ -658,6 +671,72 @@ processing:
   target_lufs: -17.0
 ```
 
+## EQ reference matching
+
+EQ matching is optional and is designed to make sermons with different original processing sound more similar. It analyzes broad tone bands rather than trying to force a detailed full-spectrum match.
+
+First, pick one good-sounding sermon that represents your target tone. Then run:
+
+```bash
+python -m sermon_processor --make-reference "/path/to/good_sermon.mp3"
+```
+
+This creates the configured reference profile, usually:
+
+```text
+reference_profiles/standard_sermon.json
+```
+
+Then enable matching in `config.yaml`:
+
+```yaml
+eq_match:
+  enabled: true
+  reference_profile: reference_profiles/standard_sermon.json
+  max_boost_db: 2.5
+  max_cut_db: -3.5
+  min_change_db: 0.5
+```
+
+The default bands are:
+
+```yaml
+eq_match:
+  bands:
+    low:
+      freq: 120
+      range: [80, 200]
+    low_mid:
+      freq: 300
+      range: [200, 500]
+    mid:
+      freq: 1000
+      range: [500, 2000]
+    presence:
+      freq: 3500
+      range: [2000, 5000]
+    high:
+      freq: 7500
+      range: [5000, 10000]
+```
+
+Recommended first test:
+
+1. Leave `eq_match.enabled: false`.
+2. Create the reference profile.
+3. Turn `eq_match.enabled: true`.
+4. Process 5-10 sermons with very different tones.
+5. Compare before/after.
+6. If correction sounds too strong, lower `max_boost_db` and make `max_cut_db` less aggressive.
+
+For example:
+
+```yaml
+eq_match:
+  max_boost_db: 1.5
+  max_cut_db: -2.5
+```
+
 ## EQ
 
 If speech sounds boomy or muddy, increase the mud cut carefully:
@@ -758,6 +837,7 @@ metadata:
 - WAV/W64 originals are ideal sources because they avoid an extra lossy generation before final MP3 output.
 - Do not repeatedly process already-processed MP3s unless needed.
 - The EQ is intentionally conservative. Loudness consistency is the main win.
+- EQ matching can help normalize tone, but it should be tested carefully; aggressive correction can make speech sound unnatural.
 - For your first archive test, process 10-20 sermons from different years/sources and listen before running the full archive.
 - Because originals are moved by default, drop copies into `inbox/` during early testing if you do not want to move your only source files yet.
 
