@@ -211,6 +211,21 @@ def is_file_stable(path: Path, checks: int, seconds: float) -> bool:
         return False
 
 
+def wait_until_file_is_stable(path: Path, checks: int, seconds: float, max_wait_seconds: float = 300) -> bool:
+    """Poll until a file is stable, or until max_wait_seconds expires.
+
+    This is more robust than a single is_file_stable() call for watcher mode.
+    Large MP3/WAV files can take longer than one event callback window to finish
+    copying, especially over a network share or external drive.
+    """
+    start_time = time.time()
+    while time.time() - start_time <= max_wait_seconds:
+        if is_file_stable(path, checks, seconds):
+            return True
+        time.sleep(seconds)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # FFmpeg loudness analysis and processing
 # ---------------------------------------------------------------------------
@@ -731,12 +746,18 @@ def get_max_parallel_jobs(cfg: Dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 class AudioFileHandler(FileSystemEventHandler):
-    """Watchdog event handler for newly-created or moved-in audio files.
+    """Watchdog event handler for newly-created, moved-in, or modified audio files.
 
     The handler does not process files directly. Instead, it places stable files
     onto a shared work queue. A fixed number of worker threads consume from that
     queue. This prevents watcher mode from launching unlimited FFmpeg jobs if a
     large batch of files is dropped into inbox/ at once.
+
+    Important watcher behavior:
+    - File-created events can fire before a file has finished copying.
+    - The previous version could mark a file as seen before it was stable.
+    - This version starts a small background waiter per new file, then queues the
+      file only after it is actually stable.
     """
 
     def __init__(self, folders: Folders, cfg: Dict[str, Any], work_queue: "queue.Queue[Path]"):
@@ -749,29 +770,57 @@ class AudioFileHandler(FileSystemEventHandler):
     def on_created(self, event):  # type: ignore[override]
         if getattr(event, "is_directory", False):
             return
-        self._maybe_enqueue(Path(event.src_path))
+        self._maybe_wait_and_enqueue(Path(event.src_path))
 
     def on_moved(self, event):  # type: ignore[override]
         if getattr(event, "is_directory", False):
             return
-        self._maybe_enqueue(Path(event.dest_path))
+        self._maybe_wait_and_enqueue(Path(event.dest_path))
 
-    def _maybe_enqueue(self, path: Path) -> None:
-        """Add a supported, stable file to the queue once."""
+    def on_modified(self, event):  # type: ignore[override]
+        # Some Windows/macOS copy operations only reliably surface modification
+        # events while the file is being written. This gives us another chance
+        # to notice a file if created/moved was missed.
+        if getattr(event, "is_directory", False):
+            return
+        self._maybe_wait_and_enqueue(Path(event.src_path))
+
+    def _maybe_wait_and_enqueue(self, path: Path) -> None:
+        """Start one background waiter for a supported file."""
         if not is_supported_input(path):
             return
 
-        # Watchdog can send several events for the same file. Protect the seen
-        # set because watchdog callbacks can happen from different threads.
         with self.lock:
             if path in self.seen:
                 return
             self.seen.add(path)
 
+        thread = threading.Thread(
+            target=self._wait_and_enqueue,
+            args=(path,),
+            name=f"sermon-wait-{path.name}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _wait_and_enqueue(self, path: Path) -> None:
+        """Wait until a file is fully copied, then place it on the work queue."""
         w = self.cfg.get("watcher", {})
-        if is_file_stable(path, int(w.get("file_stable_checks", 3)), float(w.get("file_stable_seconds", 2))):
+        checks = int(w.get("file_stable_checks", 3))
+        seconds = float(w.get("file_stable_seconds", 2))
+        max_wait = float(w.get("file_stable_max_wait_seconds", 300))
+
+        print(f"Waiting for file to finish copying: {path.name}")
+        if wait_until_file_is_stable(path, checks, seconds, max_wait):
             print(f"Queued: {path.name}")
             self.work_queue.put(path)
+            return
+
+        # If the file never became stable, allow a future event or restart to
+        # try again instead of permanently blacklisting the path.
+        print(f"File did not become stable within {max_wait} seconds: {path.name}", file=sys.stderr)
+        with self.lock:
+            self.seen.discard(path)
 
 
 def iter_inbox_audio_files(folders: Folders):
