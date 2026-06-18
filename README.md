@@ -4,7 +4,7 @@ A cross-platform Python + FFmpeg tool for automatically reprocessing spoken-word
 
 ## Current version
 
-Version 1.2 changes:
+Version 1.3 changes:
 
 - Supports `.mp3`, `.wav`, `.wave`, `.w64`, and `.wav64` originals.
 - Always outputs `.mp3` files.
@@ -16,12 +16,15 @@ Version 1.2 changes:
 - Added `.gitignore` so source audio, processed audio, reports, and virtual environments do not get committed.
 - Added VS Code + GitHub repository setup, deployment, and update instructions.
 
+- Added `archive_move_originals: true` default behavior: after a successful process, the original source is moved to `originals/` so `inbox/` stays clean.
+- Added configurable 0.5-second fade-in and fade-out by default using `enable_fades: true` and `fade_seconds: 0.5`.
+
 ## What it does
 
 Drop supported audio files into `inbox/` and the app will:
 
 1. Wait until the file copy is finished.
-2. Copy the original source file to `originals/`.
+2. Copy the source to a temporary working file.
 3. Analyze loudness using FFmpeg's two-pass `loudnorm` workflow.
 4. Apply a gentle spoken-word cleanup chain:
    - 80 Hz high-pass filter
@@ -30,14 +33,15 @@ Drop supported audio files into `inbox/` and the app will:
    - gentle compression
    - LUFS normalization
    - true-peak limiting
-5. Write a processed MP3 to `output/`.
-6. Preserve the filename stem:
+5. Add a 0.5-second fade-in and fade-out by default.
+6. Write a processed MP3 to `output/`.
+7. Preserve the filename stem:
    - `sermon.mp3` → `sermon.mp3`
    - `sermon.wav` → `sermon.mp3`
    - `sermon.w64` → `sermon.mp3`
-7. Preserve ID3 tags only when the original was MP3.
-8. Write a JSON report to `reports/`.
-9. Copy failed files to `failed/`.
+8. Preserve ID3 tags only when the original was MP3.
+9. Move the original source file to `originals/` by default so `inbox/` stays clean.
+10. Move failed files to `failed/` by default so they do not retry forever.
 
 ## Supported input and output formats
 
@@ -78,8 +82,8 @@ metadata:
 sermon_audio_processor/
   inbox/          Drop source audio files here
   output/         Finished processed MP3 files
-  originals/      Safety copies of untouched source files
-  failed/         Files copied here if processing fails
+  originals/      Untouched source files moved here after successful processing
+  failed/         Files moved here if processing fails
   processing/     Temporary working files
   reports/        Per-file JSON analysis/process reports
   config.yaml     Main tuning and folder configuration
@@ -95,6 +99,9 @@ processing:
   true_peak_db: -1.5
   lra: 7.0
   mp3_bitrate: 192k
+  enable_fades: true
+  fade_seconds: 0.5
+  archive_move_originals: true
 ```
 
 For spoken-word sermons, this is a good starting point. Test 10-20 sermons before processing the whole archive.
@@ -690,6 +697,43 @@ processing:
   compressor_ratio: 1.8
 ```
 
+## Fades
+
+The default preset adds a short fade at the beginning and end of each sermon:
+
+```yaml
+processing:
+  enable_fades: true
+  fade_seconds: 0.5
+```
+
+To disable fades entirely:
+
+```yaml
+processing:
+  enable_fades: false
+```
+
+## Archiving originals and cleaning inbox
+
+By default, successfully processed source files are moved out of `inbox/` and into `originals/`:
+
+```yaml
+processing:
+  archive_move_originals: true
+```
+
+This is recommended for long-term watcher mode because it keeps `inbox/` empty after processing and prevents accidental re-processing after a restart.
+
+To keep source files in `inbox/` and only copy them to `originals/`, change it to:
+
+```yaml
+processing:
+  archive_move_originals: false
+```
+
+When `archive_move_originals` is true, failed files are also moved to `failed/` so the watcher does not retry the same bad file forever.
+
 ## Metadata
 
 Copy ID3 tags from MP3 originals:
@@ -715,6 +759,7 @@ metadata:
 - Do not repeatedly process already-processed MP3s unless needed.
 - The EQ is intentionally conservative. Loudness consistency is the main win.
 - For your first archive test, process 10-20 sermons from different years/sources and listen before running the full archive.
+- Because originals are moved by default, drop copies into `inbox/` during early testing if you do not want to move your only source files yet.
 
 # Troubleshooting
 

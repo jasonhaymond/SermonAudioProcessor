@@ -12,7 +12,7 @@ Design goals:
 - Always output MP3 files to the output folder.
 - Preserve MP3 ID3 tags when the original is MP3.
 - Create blank ID3 tags when the original is WAV/W64, with only an optional processing comment.
-- Keep source files untouched by copying originals to the originals folder.
+- Archive originals either by moving them to originals/ by default or copying them if configured.
 - Write JSON reports so later tuning/debugging is easier.
 
 The processing itself is intentionally delegated to FFmpeg. Python handles orchestration,
@@ -255,6 +255,17 @@ def build_pre_loudnorm_filters(cfg: Dict[str, Any]) -> list[str]:
             f"acompressor=threshold={threshold}:ratio={ratio}:attack={attack}:release={release}:makeup={makeup}"
         )
 
+    if p.get("enable_fades", True):
+        # Add small clean fades to avoid abrupt starts/stops or MP3 edge clicks.
+        # Fade-in is straightforward. Fade-out is implemented with reverse/fade/reverse
+        # so we do not have to calculate exact duration for every source file.
+        fade_seconds = float(p.get("fade_seconds", 0.5))
+        if fade_seconds > 0:
+            filters.append(f"afade=t=in:st=0:d={fade_seconds}")
+            filters.append("areverse")
+            filters.append(f"afade=t=in:st=0:d={fade_seconds}")
+            filters.append("areverse")
+
     return filters
 
 
@@ -426,10 +437,9 @@ def process_file(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Opt
     }
 
     try:
-        # Copy original for safety and copy a working file for processing. This
-        # means the inbox source can be moved/archived later without interrupting
-        # FFmpeg once processing begins.
-        shutil.copy2(input_file, original_copy)
+        # Copy a working file into processing/ first. FFmpeg operates only on
+        # this working copy, so the source can later be moved to originals/
+        # without interrupting the active encode.
         shutil.copy2(input_file, work_input)
 
         analysis = first_pass_loudnorm(work_input, cfg)
@@ -441,9 +451,22 @@ def process_file(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Opt
         final_output = output_file if not output_file.exists() else unique_path(output_file)
         shutil.move(str(work_output), final_output)
 
+        # Archive the original source after a successful output is created.
+        # Default behavior is move=True so inbox/ stays clean. Set
+        # archive_move_originals: false in config.yaml if you prefer to leave
+        # the source in place and only copy it to originals/.
+        archive_move = bool(cfg.get("processing", {}).get("archive_move_originals", True))
+        if archive_move:
+            shutil.move(str(input_file), str(original_copy))
+            archive_action = "moved"
+        else:
+            shutil.copy2(input_file, original_copy)
+            archive_action = "copied"
+
         report["output_file"] = str(final_output)
         report["output_audio_info"] = get_audio_info(final_output)
-        report["original_copy"] = str(original_copy)
+        report["original_archive"] = str(original_copy)
+        report["archive_action"] = archive_action
         report["finished_at"] = datetime.now().isoformat(timespec="seconds")
         report["status"] = "completed"
         write_report(report_file, report)
@@ -454,12 +477,20 @@ def process_file(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Opt
         report["status"] = "failed"
         report["error"] = str(exc)
         report["finished_at"] = datetime.now().isoformat(timespec="seconds")
-        write_report(report_file, report)
         failed_dest = unique_path(folders.failed / input_file.name)
         try:
-            shutil.copy2(input_file, failed_dest)
-        except Exception:
-            pass
+            # If archive_move_originals is enabled, also move failed inputs out
+            # of inbox/ so they do not get retried forever by watcher mode.
+            if bool(cfg.get("processing", {}).get("archive_move_originals", True)):
+                shutil.move(str(input_file), str(failed_dest))
+                report["failed_source_action"] = "moved_to_failed"
+            else:
+                shutil.copy2(input_file, failed_dest)
+                report["failed_source_action"] = "copied_to_failed"
+            report["failed_file"] = str(failed_dest)
+        except Exception as move_exc:
+            report["failed_source_action"] = f"could_not_archive_failed_source: {move_exc}"
+        write_report(report_file, report)
         print(f"FAILED: {input_file.name}: {exc}", file=sys.stderr)
         return None
     finally:
