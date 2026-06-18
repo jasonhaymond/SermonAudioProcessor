@@ -1,0 +1,31 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Sermon Processor working folders
+# Keep these folders local. Do not accidentally upload private sermon files,
+# processed audio, temporary files, reports, or failed/original copies to GitHub.
+inbox/*
+output/*
+originals/*
+failed/*
+processing/*
+reports/*
+
+# Keep empty folder placeholders if you add them later.
+!inbox/.gitkeep
+!output/.gitkeep
+!originals/.gitkeep
+!failed/.gitkeep
+!processing/.gitkeep
+!reports/.gitkeep
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/

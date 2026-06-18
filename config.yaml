@@ -1,0 +1,75 @@
+# Sermon Audio Processor configuration
+# =====================================
+# Podcast-style spoken-word preset.
+#
+# All input files are processed to MP3 output.
+# Supported input extensions: .mp3, .wav, .wave, .w64, .wav64
+#
+# Relative folder paths are relative to this project folder. You can also use
+# absolute paths for long-term deployment, for example:
+#   inbox: "D:/Sermons/To Process"
+#   output: "D:/Sermons/Processed"
+
+folders:
+  inbox: inbox
+  output: output
+  originals: originals
+  failed: failed
+  reports: reports
+  processing: processing
+
+processing:
+  # Podcast-style spoken-word loudness target.
+  # -16 LUFS is common for stereo podcast-style speech.
+  target_lufs: -16.0
+
+  # True peak ceiling. Leave headroom so MP3 conversion/playback does not clip.
+  true_peak_db: -1.5
+
+  # Loudness range target. Lower = more even; higher = more natural dynamics.
+  lra: 7.0
+
+  # Final MP3 technical settings.
+  sample_rate: 44100
+  mp3_bitrate: 192k
+
+  # Safe spoken-word cleanup. Start gentle, then tune after listening tests.
+  highpass_hz: 80
+  enable_speech_eq: true
+  mud_cut_hz: 250
+  mud_cut_q: 1.0
+  mud_cut_db: -1.5
+  presence_boost_hz: 3500
+  presence_boost_q: 1.0
+  presence_boost_db: 1.2
+
+  # Gentle speech compression before loudness normalization.
+  enable_compression: true
+  compressor_threshold: -22dB
+  compressor_ratio: 2.2
+  compressor_attack_ms: 20
+  compressor_release_ms: 250
+  compressor_makeup_db: 1.5
+
+  # Final limiter after loudness normalization.
+  enable_limiter: true
+
+  # Prevent re-processing an already completed output file.
+  skip_existing_outputs: true
+
+watcher:
+  # How often the watcher loop wakes up while idle.
+  poll_seconds: 3
+
+  # File-copy safety: the app waits for the file size to stop changing before processing.
+  file_stable_checks: 3
+  file_stable_seconds: 2
+
+metadata:
+  # For MP3 originals, copy ID3 tags to the output MP3.
+  # For WAV/W64 originals, the output MP3 starts with blank ID3 tags.
+  preserve_id3_tags: true
+
+  # Adds a small ID3 comment showing when SermonProcessor created the file.
+  # Set false if you want completely blank tags for WAV/W64 outputs.
+  write_processing_comment: true

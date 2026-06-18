@@ -1,0 +1,8 @@
+# ID3 tag reading/writing for MP3 metadata preservation.
+mutagen>=1.47.0
+
+# YAML config file support.
+PyYAML>=6.0.1
+
+# Cross-platform folder watching.
+watchdog>=4.0.0
