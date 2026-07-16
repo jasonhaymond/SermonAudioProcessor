@@ -1,14 +1,12 @@
 # Sermon Audio Processor configuration
 # =====================================
-# Podcast-style spoken-word preset.
+# Version 4 beta configuration.
 #
-# All input files are processed to MP3 output.
+# This beta keeps the existing processing chain, then adds mode-based EQ matching,
+# speech/perceptual profile analysis, before/after scoring, and guardrails.
+#
 # Supported input extensions: .mp3, .wav, .wave, .w64, .wav64
-#
-# Relative folder paths are relative to this project folder. You can also use
-# absolute paths for long-term deployment, for example:
-#   inbox: "D:/Sermons/To Process"
-#   output: "D:/Sermons/Processed"
+# Output format: .mp3 only
 
 folders:
   inbox: inbox
@@ -20,58 +18,75 @@ folders:
   reference_profiles: reference_profiles
 
 threads:
-  # Number of concurrent processing threads.
   # Number of files to process at the same time.
-  # Be cautious when increasing this value, as it can strain system resources.
-  # and can cause performance issues.
-  #
   # Good starting values:
-  # [Default] MacBook Air: 2
-  # Strong Windows desktop: 3-4
+  #   MacBook Air: 2
+  #   Strong Windows desktop: 3-4
   # Use 1 to disable parallel processing.
   max_parallel_jobs: 2
 
-
-# Optional broad-band EQ reference matching.
+# Version 4 beta EQ matching
+# --------------------------
 # Workflow:
-#   1. Pick a good-sounding sermon.
-#   2. Run: python -m sermon_processor --make-reference "/path/to/good_sermon.mp3"
-#   3. Set enabled: true after you have listened/tested.
+#   1. Choose a mode below.
+#   2. Generate a fresh reference profile in that mode:
+#        .\.venv\Scripts\python.exe -m sermon_processor --make-reference "C:\Path\To\GoodSermon.mp3"
+#      macOS/Linux:
+#        .venv/bin/python -m sermon_processor --make-reference "/path/to/good_sermon.mp3"
+#   3. Test with --analyze-profile and a few individual files.
+#   4. Set enabled: true only after listening tests.
 #
-# This compares low/mid/high tone bands against a saved reference profile and
-# applies capped EQ correction. Keep the caps modest to avoid unnatural speech.
+# Available modes:
+#   broad  = legacy five-band matching. Safest and simplest.
+#   speech = speech-focused bands: rumble, warmth, mud, clarity, presence, sibilance, noise_air.
+#   mel    = experimental Mel-ish perceptual bands converted to practical EQ filters.
+#   bark   = experimental Bark/critical-band-ish profile converted to practical EQ filters.
+#
+# Important: if you change mode, regenerate the reference profile.
 eq_match:
-  enabled: true
+  enabled: false
+  mode: speech
   reference_profile: reference_profiles/standard_sermon.json
-  max_boost_db: 14.0
-  max_cut_db: -14.0
-  min_change_db: 0.1
-  bands:
-    low:
-      freq: 120
-      range: [80, 200]
-      q: 0.8
-    low_mid:
-      freq: 300
-      range: [200, 500]
-      q: 0.9
-    mid:
-      freq: 1000
-      range: [500, 2000]
-      q: 0.8
-    presence:
-      freq: 3500
-      range: [2000, 5000]
-      q: 0.8
-    high:
-      freq: 7500
-      range: [5000, 10000]
-      q: 0.7
+
+  # Overall strength controls.
+  # profile_strength scales calculated correction before per-band caps.
+  # correction_scale is used internally and may be reduced by guardrails.
+  profile_strength: 1.0
+  correction_scale: 1.0
+
+  # Global limits used when a band does not define its own tighter limits.
+  max_boost_db: 2.5
+  max_cut_db: -3.5
+  min_change_db: 0.5
+
+  # Report scoring.
+  # The score is not an official broadcast standard. It is a useful 0-100
+  # beta-testing number based on average weighted difference from the reference.
+  scoring:
+    match_tolerance_db: 8.0
+
+  # Safety guardrails.
+  # If a file is wildly different from the reference, the app reduces correction
+  # strength rather than making heroic EQ moves. Software heroism is how you get
+  # louder HVAC and thinner pastors.
+  guardrails:
+    enabled: true
+    max_average_difference_db: 12.0
+    low_confidence_correction_scale: 0.5
+
+  # Optional band overrides.
+  # Leave empty to use the mode defaults built into app.py.
+  # Example:
+  # bands:
+  #   mud:
+  #     max_cut_db: -5.0
+  #   noise_air:
+  #     allow_boost: false
+  bands: {}
 
 processing:
   # Podcast-style spoken-word loudness target.
-  # -16 LUFS is common for stereo podcast-style speech.
-  target_lufs: -15.0
+  target_lufs: -16.0
 
   # True peak ceiling. Leave headroom so MP3 conversion/playback does not clip.
   true_peak_db: -1.0
@@ -83,9 +98,9 @@ processing:
   sample_rate: 44100
   mp3_bitrate: 192k
 
-  # Safe spoken-word cleanup. Start gentle, then tune after listening tests.
+  # Safe spoken-word cleanup. Keep this conservative when EQ matching is enabled.
   highpass_hz: 90
-  enable_speech_eq: false
+  enable_speech_eq: true
   mud_cut_hz: 250
   mud_cut_q: 1.0
   mud_cut_db: -2.5
@@ -93,19 +108,18 @@ processing:
   presence_boost_q: 1.0
   presence_boost_db: 1.2
 
-  # Noise Reduction settings.
+  # Noise reduction.
+  # Start around 6-10. Heavy denoise can make speech watery/robotic.
   enable_noise_reduction: true
-  noise_reduction_strength: 7
+  noise_reduction_strength: 9
 
   # Gentle speech compression before loudness normalization.
   enable_compression: true
-
-  # Start around -24dB. Adjust as needed based on the source material.
   compressor_threshold: -24dB
-  compressor_ratio: 2.3
+  compressor_ratio: 2.4
   compressor_attack_ms: 1
   compressor_release_ms: 150
-  compressor_makeup_db: 2.1
+  compressor_makeup_db: 2.4
 
   # Add short fades to clean up hard starts/stops and edge clicks.
   enable_fades: true
@@ -115,20 +129,16 @@ processing:
   enable_limiter: true
 
   # After successful processing, move the original source into originals/.
-  # This keeps inbox/ clean and avoids re-processing after restarts.
-  # Set false to copy to originals/ and leave the source file in place.
   archive_move_originals: true
 
   # Prevent re-processing an already completed output file.
   skip_existing_outputs: true
 
 watcher:
-  # How often the watcher loop wakes up while idle.
   poll_seconds: 3
-
-  # File-copy safety: the app waits for the file size to stop changing before processing.
   file_stable_checks: 3
   file_stable_seconds: 2
+  file_stable_max_wait_seconds: 300
 
 metadata:
   # For MP3 originals, copy ID3 tags to the output MP3.
@@ -136,5 +146,4 @@ metadata:
   preserve_id3_tags: true
 
   # Adds a small ID3 comment showing when SermonProcessor created the file.
-  # Set false if you want completely blank tags for WAV/W64 outputs.
   write_processing_comment: true

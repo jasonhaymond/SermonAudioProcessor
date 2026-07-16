@@ -2,6 +2,284 @@
 
 A cross-platform Python + FFmpeg tool for automatically reprocessing spoken-word sermon audio into consistent podcast-style MP3 files.
 
+
+## Version 4 beta branch
+
+Version 4 beta adds an experimental speech/perceptual profile engine on top of the existing processor. This should be tested in a Git beta branch before replacing the live version.
+
+New beta features:
+
+- `eq_match.mode` with supported modes:
+  - `broad`: legacy five-band matching.
+  - `speech`: speech-intelligibility-focused bands for sermons and podcasts.
+  - `mel`: experimental Mel-ish perceptual bands converted to practical EQ filters.
+  - `bark`: experimental Bark/critical-band-ish profile converted to practical EQ filters.
+- Speech-focused bands such as rumble, warmth, mud, body, clarity, presence, sibilance, and noise/air.
+- Cut-only rules for bands that should generally not be boosted, such as rumble and noise/air.
+- Per-band boost/cut limits.
+- Before/after tone-match scoring in each processing report.
+- `--analyze-profile` command for testing one file against the current reference without processing it.
+- Guardrails that reduce correction strength when a file is extremely different from the reference.
+- Watcher stability fix: the watcher now handles created, moved, and modified events more safely and waits for copied files to finish before queueing them.
+
+Important beta rule: if you change `eq_match.mode`, regenerate the reference profile. A profile made in `broad` mode does not match the band layout used by `speech`, `mel`, or `bark`.
+
+---
+
+# Beta Git workflow
+
+From your project folder, create a beta branch before replacing files:
+
+```bash
+git status
+git add .
+git commit -m "Save current stable sermon processor before v4 beta"
+git checkout -b beta/v4-speech-profile
+```
+
+Now replace these files from the beta update package:
+
+```text
+sermon_processor/app.py
+config.yaml
+README.md
+```
+
+Then commit the beta files:
+
+```bash
+git add sermon_processor/app.py config.yaml README.md
+git commit -m "Add v4 beta speech and perceptual EQ profile matching"
+git push -u origin beta/v4-speech-profile
+```
+
+To return to your live/stable version at any time:
+
+```bash
+git checkout main
+```
+
+To go back to beta testing:
+
+```bash
+git checkout beta/v4-speech-profile
+```
+
+When the beta is tested and you are ready to merge:
+
+```bash
+git checkout main
+git merge beta/v4-speech-profile
+git push
+```
+
+Human civilization has somehow survived branching strategies, so this should be manageable.
+
+---
+
+# Version 4 beta testing workflow
+
+## 1. Start with beta disabled
+
+The beta config ships with:
+
+```yaml
+eq_match:
+  enabled: false
+  mode: speech
+```
+
+This lets you install the beta without immediately changing output tone.
+
+## 2. Choose a mode
+
+Recommended order for testing:
+
+```text
+speech first
+broad second, as a control
+mel third, experimental
+bark fourth, experimental
+```
+
+Most likely best mode for sermon speech:
+
+```yaml
+eq_match:
+  mode: speech
+```
+
+## 3. Generate a fresh reference profile
+
+Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m sermon_processor --make-reference "C:\Path\To\GoodSermon.mp3"
+```
+
+macOS/Linux:
+
+```bash
+.venv/bin/python -m sermon_processor --make-reference "/path/to/good_sermon.mp3"
+```
+
+This creates or replaces:
+
+```text
+reference_profiles/standard_sermon.json
+```
+
+Validate the JSON if you edit it manually:
+
+```powershell
+.\.venv\Scripts\python.exe -m json.tool .\reference_profiles\standard_sermon.json
+```
+
+## 4. Analyze files before processing
+
+Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m sermon_processor --analyze-profile "C:\Path\To\TestSermon.mp3"
+```
+
+macOS/Linux:
+
+```bash
+.venv/bin/python -m sermon_processor --analyze-profile "/path/to/test_sermon.mp3"
+```
+
+Look at:
+
+```text
+tone_match_score
+average_difference_db
+potential_issues
+band_differences_db
+```
+
+## 5. Enable EQ matching for small tests only
+
+```yaml
+eq_match:
+  enabled: true
+  mode: speech
+```
+
+Process 5-10 representative sermons, not the whole archive. Yes, restraint. Horrifying concept.
+
+## 6. Review reports
+
+Each processed file writes a JSON report in `reports/` with:
+
+```text
+eq_match.tone_match_score_before
+eq_match.tone_match_score_after
+eq_match.score_delta
+eq_match.diagnostics_before
+eq_match.diagnostics_after
+eq_match.corrections
+```
+
+A good beta result is usually:
+
+```text
+score_after > score_before
+corrections are modest
+speech sounds more consistent
+hiss/rumble are not boosted
+clarity improves without harshness
+```
+
+## 7. Tune strength safely
+
+If beta EQ is too aggressive:
+
+```yaml
+eq_match:
+  profile_strength: 0.6
+  max_boost_db: 1.5
+  max_cut_db: -2.5
+```
+
+If files still sound too different:
+
+```yaml
+eq_match:
+  profile_strength: 1.0
+  max_boost_db: 2.5
+  max_cut_db: -3.5
+```
+
+If a specific band is a problem, override only that band:
+
+```yaml
+eq_match:
+  bands:
+    mud:
+      max_cut_db: -5.0
+    noise_air:
+      allow_boost: false
+```
+
+## 8. Mode comparison testing
+
+To compare modes fairly:
+
+1. Set `mode: speech`.
+2. Generate reference.
+3. Process the same 3-5 test sermons.
+4. Save outputs in a separate folder.
+5. Repeat with `mode: broad`, `mode: mel`, or `mode: bark`.
+6. Compare listening results and JSON score deltas.
+
+Do not reuse a reference profile after switching modes. Regenerate it every time.
+
+---
+
+# Version 4 beta EQ mode notes
+
+## broad
+
+Best for conservative matching. It uses five bands:
+
+```text
+low
+low_mid
+mid
+presence
+high
+```
+
+Use this as a control if speech mode sounds too active.
+
+## speech
+
+Best first choice for sermons. It uses speech-specific bands:
+
+```text
+rumble
+warmth
+mud
+body
+clarity
+presence
+sibilance
+noise_air
+```
+
+Rumble and noise/air are cut-only by default. This prevents the processor from boosting low-end junk or hiss. Revolutionary. Also obvious.
+
+## mel
+
+Experimental perceptual-style matching using more bands. It can be more accurate, but it can also be more active. Use only after speech mode has been tested.
+
+## bark
+
+Experimental critical-band-style matching. It may better approximate how humans separate frequency regions, but it is still implemented as practical FFmpeg EQ filters, not a full psychoacoustic model.
+
+---
+
 ## Current version
 
 Version 1.4 changes:

@@ -261,36 +261,174 @@ def resolve_reference_profile_path(folders: Folders, cfg: Dict[str, Any]) -> Pat
     return profile_path
 
 
-def get_eq_match_bands(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Return configured broad EQ-match bands, with safe defaults.
+def get_eq_match_mode(cfg: Dict[str, Any]) -> str:
+    """Return the active EQ-match mode.
 
-    Each band is intentionally broad. For sermons, broad tone correction is much
-    safer than trying to match dozens of narrow EQ points, which can make speech
-    sound unnatural or phasey.
+    Modes:
+    - broad: legacy five-band low/mid/high matching.
+    - speech: speech-intelligibility-focused matching with cut-only junk bands.
+    - mel: perceptual-style bands approximating the Mel scale.
+    - bark: perceptual-style bands approximating Bark/critical hearing bands.
+
+    The mel/bark modes are intentionally dependency-free approximations using
+    FFmpeg bandpass measurements. This is not a psychoacoustic research rig,
+    which is tragic, but it is practical and testable.
     """
-    defaults = {
-        "low": {"freq": 120, "range": [80, 200], "q": 0.8},
-        "low_mid": {"freq": 300, "range": [200, 500], "q": 0.9},
-        "mid": {"freq": 1000, "range": [500, 2000], "q": 0.8},
-        "presence": {"freq": 3500, "range": [2000, 5000], "q": 0.8},
-        "high": {"freq": 7500, "range": [5000, 10000], "q": 0.7},
+    mode = str(cfg.get("eq_match", {}).get("mode", "speech")).lower().strip()
+    if mode not in {"broad", "speech", "mel", "bark"}:
+        print(f"Unknown eq_match.mode '{mode}', falling back to 'speech'.", file=sys.stderr)
+        return "speech"
+    return mode
+
+
+def default_broad_bands() -> Dict[str, Dict[str, Any]]:
+    """Legacy broad tone bands retained as a safe fallback."""
+    return {
+        "low": {"freq": 120, "range": [80, 200], "q": 0.8, "weight": 0.8},
+        "low_mid": {"freq": 300, "range": [200, 500], "q": 0.9, "weight": 1.1},
+        "mid": {"freq": 1000, "range": [500, 2000], "q": 0.8, "weight": 1.0},
+        "presence": {"freq": 3500, "range": [2000, 5000], "q": 0.8, "weight": 1.2},
+        "high": {"freq": 7500, "range": [5000, 10000], "q": 0.7, "weight": 0.7},
     }
-    configured = cfg.get("eq_match", {}).get("bands") or {}
+
+
+def default_speech_bands() -> Dict[str, Dict[str, Any]]:
+    """Speech-focused bands for sermon/podcast tone matching.
+
+    These are based on practical speech ranges rather than generic music EQ.
+    Some bands are cut-only by default because boosting them usually creates
+    louder rumble, hiss, or sibilance instead of clearer speech. Humanity, in
+    its endless wisdom, keeps recording HVAC systems along with sermons.
+    """
+    return {
+        "rumble": {
+            "freq": 50, "range": [20, 80], "q": 0.7, "weight": 0.4,
+            "allow_boost": False, "allow_cut": True, "max_cut_db": -8.0,
+        },
+        "warmth": {
+            "freq": 125, "range": [80, 180], "q": 0.8, "weight": 0.9,
+            "max_boost_db": 2.0, "max_cut_db": -3.0,
+        },
+        "mud": {
+            "freq": 280, "range": [180, 400], "q": 0.9, "weight": 1.4,
+            "max_boost_db": 1.5, "max_cut_db": -4.5,
+        },
+        "body": {
+            "freq": 650, "range": [400, 900], "q": 0.9, "weight": 1.0,
+            "max_boost_db": 2.0, "max_cut_db": -3.0,
+        },
+        "clarity": {
+            "freq": 1600, "range": [900, 2500], "q": 0.8, "weight": 1.4,
+            "max_boost_db": 3.0, "max_cut_db": -2.5,
+        },
+        "presence": {
+            "freq": 3500, "range": [2500, 5000], "q": 0.8, "weight": 1.3,
+            "max_boost_db": 2.5, "max_cut_db": -3.0,
+        },
+        "sibilance": {
+            "freq": 6500, "range": [5000, 8000], "q": 0.9, "weight": 0.9,
+            "max_boost_db": 1.0, "max_cut_db": -4.0,
+        },
+        "noise_air": {
+            "freq": 9500, "range": [8000, 12000], "q": 0.7, "weight": 0.5,
+            "allow_boost": False, "allow_cut": True, "max_cut_db": -6.0,
+        },
+    }
+
+
+def default_mel_bands() -> Dict[str, Dict[str, Any]]:
+    """Perceptual-style Mel-ish bands converted to practical EQ points.
+
+    This approximates a perceptual profile while still producing simple FFmpeg
+    equalizer filters. It is more detailed than speech mode and should be used
+    as a beta experiment, not an excuse to let the robot ruin 800 sermons at 3am.
+    """
+    return {
+        "mel_01_sub": {"freq": 60, "range": [30, 90], "q": 0.8, "weight": 0.25, "allow_boost": False, "max_cut_db": -8.0},
+        "mel_02_warmth": {"freq": 120, "range": [90, 170], "q": 0.9, "weight": 0.7, "max_boost_db": 1.5, "max_cut_db": -2.5},
+        "mel_03_low_body": {"freq": 220, "range": [170, 300], "q": 0.9, "weight": 1.0, "max_boost_db": 1.5, "max_cut_db": -3.5},
+        "mel_04_mud": {"freq": 360, "range": [300, 500], "q": 0.9, "weight": 1.25, "max_boost_db": 1.0, "max_cut_db": -4.0},
+        "mel_05_body": {"freq": 650, "range": [500, 900], "q": 0.9, "weight": 1.0, "max_boost_db": 2.0, "max_cut_db": -3.0},
+        "mel_06_clarity_low": {"freq": 1100, "range": [900, 1400], "q": 0.9, "weight": 1.2, "max_boost_db": 2.5, "max_cut_db": -2.5},
+        "mel_07_clarity": {"freq": 1800, "range": [1400, 2500], "q": 0.8, "weight": 1.4, "max_boost_db": 3.0, "max_cut_db": -2.5},
+        "mel_08_presence": {"freq": 3200, "range": [2500, 4200], "q": 0.8, "weight": 1.3, "max_boost_db": 2.5, "max_cut_db": -3.0},
+        "mel_09_edge": {"freq": 4800, "range": [4200, 5800], "q": 0.9, "weight": 0.9, "max_boost_db": 1.5, "max_cut_db": -3.5},
+        "mel_10_sibilance": {"freq": 6800, "range": [5800, 8000], "q": 0.9, "weight": 0.7, "max_boost_db": 0.8, "max_cut_db": -4.0},
+        "mel_11_hiss": {"freq": 9500, "range": [8000, 11500], "q": 0.8, "weight": 0.45, "allow_boost": False, "max_cut_db": -6.0},
+        "mel_12_air": {"freq": 13500, "range": [11500, 16000], "q": 0.7, "weight": 0.25, "allow_boost": False, "max_cut_db": -6.0},
+    }
+
+
+def default_bark_bands() -> Dict[str, Dict[str, Any]]:
+    """Bark/critical-band-style profile for experimental matching.
+
+    Bark mode is a little more hearing-inspired than broad EQ and a little less
+    speech-prescriptive than speech mode. It is useful for comparisons while you
+    are testing which profile sounds least like a committee made it.
+    """
+    return {
+        "bark_01_rumble": {"freq": 50, "range": [20, 100], "q": 0.7, "weight": 0.25, "allow_boost": False, "max_cut_db": -8.0},
+        "bark_02_warmth": {"freq": 150, "range": [100, 200], "q": 0.9, "weight": 0.7, "max_boost_db": 1.5, "max_cut_db": -2.5},
+        "bark_03_low_body": {"freq": 280, "range": [200, 400], "q": 0.9, "weight": 1.0, "max_boost_db": 1.5, "max_cut_db": -3.5},
+        "bark_04_mud": {"freq": 510, "range": [400, 630], "q": 0.9, "weight": 1.1, "max_boost_db": 1.2, "max_cut_db": -3.5},
+        "bark_05_body": {"freq": 770, "range": [630, 920], "q": 0.9, "weight": 1.0, "max_boost_db": 2.0, "max_cut_db": -3.0},
+        "bark_06_clarity_low": {"freq": 1080, "range": [920, 1270], "q": 0.9, "weight": 1.1, "max_boost_db": 2.2, "max_cut_db": -2.5},
+        "bark_07_clarity": {"freq": 1480, "range": [1270, 1720], "q": 0.9, "weight": 1.3, "max_boost_db": 2.8, "max_cut_db": -2.5},
+        "bark_08_intelligibility": {"freq": 2000, "range": [1720, 2320], "q": 0.8, "weight": 1.4, "max_boost_db": 3.0, "max_cut_db": -2.5},
+        "bark_09_presence": {"freq": 2700, "range": [2320, 3150], "q": 0.8, "weight": 1.2, "max_boost_db": 2.5, "max_cut_db": -3.0},
+        "bark_10_presence_edge": {"freq": 3700, "range": [3150, 4400], "q": 0.8, "weight": 1.0, "max_boost_db": 2.0, "max_cut_db": -3.0},
+        "bark_11_sibilance": {"freq": 5300, "range": [4400, 6400], "q": 0.8, "weight": 0.75, "max_boost_db": 1.0, "max_cut_db": -4.0},
+        "bark_12_hiss": {"freq": 7700, "range": [6400, 9500], "q": 0.8, "weight": 0.55, "allow_boost": False, "max_cut_db": -5.5},
+        "bark_13_noise_air": {"freq": 12000, "range": [9500, 15500], "q": 0.7, "weight": 0.35, "allow_boost": False, "max_cut_db": -6.0},
+    }
+
+
+def get_default_bands_for_mode(mode: str) -> Dict[str, Dict[str, Any]]:
+    """Return default band map for the requested EQ-match mode."""
+    if mode == "broad":
+        return default_broad_bands()
+    if mode == "mel":
+        return default_mel_bands()
+    if mode == "bark":
+        return default_bark_bands()
+    return default_speech_bands()
+
+
+def get_eq_match_bands(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return active EQ-match bands for the configured mode.
+
+    Configured bands override defaults for the selected mode. This lets you tune
+    one or two bands without copying a giant block of YAML. Because apparently
+    humans enjoy turning config files into archaeological digs.
+    """
+    eq_cfg = cfg.get("eq_match", {})
+    mode = get_eq_match_mode(cfg)
+    defaults = get_default_bands_for_mode(mode)
+    configured = eq_cfg.get("bands") or {}
+
     merged: Dict[str, Dict[str, Any]] = {}
     for name, default_band in defaults.items():
         band = dict(default_band)
         if isinstance(configured.get(name), dict):
             band.update(configured[name])
         merged[name] = band
+
+    # Allow fully custom bands if mode: custom-ish behavior is desired while
+    # still using one of the known modes as the base.
+    for name, band_cfg in configured.items():
+        if name not in merged and isinstance(band_cfg, dict):
+            merged[name] = dict(band_cfg)
+
     return merged
 
 
 def measure_band_mean_volume(input_file: Path, center_freq: float, low_freq: float, high_freq: float) -> Optional[float]:
-    """Measure approximate mean dB level for one broad frequency band.
+    """Measure approximate mean dB level for one frequency band.
 
     This uses FFmpeg's bandpass filter followed by volumedetect. It is not a
-    laboratory-grade spectral analyzer, but it is practical, dependency-free,
-    and good enough for broad low/mid/high sermon tone matching.
+    lab-grade critical-band analyzer, but it is practical, dependency-free, and
+    consistent across macOS/Windows/Linux. The beta modes use more thoughtful
+    bands, not magical brain science. Progress, such as it is.
     """
     width_hz = max(1.0, float(high_freq) - float(low_freq))
     filter_chain = f"bandpass=f={float(center_freq)}:width_type=h:width={width_hz},volumedetect"
@@ -302,7 +440,6 @@ def measure_band_mean_volume(input_file: Path, center_freq: float, low_freq: flo
     if result.returncode != 0:
         raise ProcessingError("FFmpeg EQ-band analysis failed:\n" + result.stderr[-4000:])
 
-    # volumedetect writes lines like: mean_volume: -24.3 dB
     match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr)
     if not match:
         return None
@@ -310,7 +447,8 @@ def measure_band_mean_volume(input_file: Path, center_freq: float, low_freq: flo
 
 
 def analyze_eq_profile(input_file: Path, cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Analyze broad-band tonal balance for an audio file."""
+    """Analyze tonal balance for the active EQ-match mode."""
+    mode = get_eq_match_mode(cfg)
     bands = get_eq_match_bands(cfg)
     measured: Dict[str, Any] = {}
     for name, band in bands.items():
@@ -322,12 +460,17 @@ def analyze_eq_profile(input_file: Path, cfg: Dict[str, Any]) -> Dict[str, Any]:
             "freq": center_freq,
             "range": [low_freq, high_freq],
             "q": float(band.get("q", 0.8)),
+            "weight": float(band.get("weight", 1.0)),
+            "allow_boost": bool(band.get("allow_boost", True)),
+            "allow_cut": bool(band.get("allow_cut", True)),
             "mean_db": measure_band_mean_volume(input_file, center_freq, low_freq, high_freq),
         }
 
     return {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_file": str(input_file),
+        "mode": mode,
+        "analysis_method": "ffmpeg_bandpass_volumedetect",
         "bands": measured,
     }
 
@@ -337,37 +480,149 @@ def write_eq_reference_profile(input_file: Path, folders: Folders, cfg: Dict[str
     if not is_supported_input(input_file):
         raise ProcessingError(f"Unsupported reference file type: {input_file}")
     profile = analyze_eq_profile(input_file, cfg)
+    profile["profile_type"] = "eq_match_reference"
+    profile["notes"] = (
+        "Generated from the active eq_match.mode. If you change modes, regenerate "
+        "this profile so band names and targets match."
+    )
     profile_path = resolve_reference_profile_path(folders, cfg)
     with profile_path.open("w", encoding="utf-8") as f:
         json.dump(profile, f, indent=2)
     return profile_path
 
 
+def weighted_average_difference(reference_profile: Dict[str, Any], current_profile: Dict[str, Any]) -> Optional[float]:
+    """Return weighted average absolute dB difference between two profiles."""
+    total_weight = 0.0
+    total_difference = 0.0
+    reference_bands = reference_profile.get("bands", {})
+    current_bands = current_profile.get("bands", {})
+
+    for name, current in current_bands.items():
+        reference = reference_bands.get(name)
+        if not reference:
+            continue
+        current_db = current.get("mean_db")
+        reference_db = reference.get("mean_db")
+        if current_db is None or reference_db is None:
+            continue
+        weight = float(current.get("weight", reference.get("weight", 1.0)) or 1.0)
+        total_difference += abs(float(reference_db) - float(current_db)) * weight
+        total_weight += weight
+
+    if total_weight <= 0:
+        return None
+    return total_difference / total_weight
+
+
+def tone_match_score(reference_profile: Dict[str, Any], current_profile: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return a 0-100 profile match score and average difference.
+
+    A score of 100 means the measured profile matches the reference profile.
+    A score near 0 means the average weighted difference exceeded the configured
+    tolerance. This is not an official broadcast metric. It is a useful dashboard
+    number so the beta can stop relying on vibes, the traditional audio method.
+    """
+    scoring_cfg = cfg.get("eq_match", {}).get("scoring", {})
+    tolerance = float(scoring_cfg.get("match_tolerance_db", 8.0))
+    avg = weighted_average_difference(reference_profile, current_profile)
+    if avg is None:
+        return None
+    score = clamp(100.0 - ((avg / max(tolerance, 0.1)) * 100.0), 0.0, 100.0)
+    return {
+        "score": round(score, 1),
+        "average_difference_db": round(avg, 3),
+        "tolerance_db": tolerance,
+    }
+
+
+def build_profile_diagnostics(reference_profile: Dict[str, Any], current_profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Create human-readable diagnostics from profile differences."""
+    diagnostics: Dict[str, Any] = {"band_differences_db": {}, "potential_issues": []}
+    reference_bands = reference_profile.get("bands", {})
+    current_bands = current_profile.get("bands", {})
+
+    for name, current in current_bands.items():
+        reference = reference_bands.get(name)
+        if not reference:
+            continue
+        current_db = current.get("mean_db")
+        reference_db = reference.get("mean_db")
+        if current_db is None or reference_db is None:
+            continue
+        difference = round(float(current_db) - float(reference_db), 3)
+        diagnostics["band_differences_db"][name] = difference
+
+        if name in {"mud", "low_mid", "mel_04_mud", "bark_04_mud"} and difference > 2.0:
+            diagnostics["potential_issues"].append(f"{name} is high versus reference: possible mud/boxiness")
+        if name in {"clarity", "presence", "bark_08_intelligibility", "mel_07_clarity"} and difference < -2.0:
+            diagnostics["potential_issues"].append(f"{name} is low versus reference: possible reduced speech clarity")
+        if name in {"sibilance", "noise_air", "mel_10_sibilance", "mel_11_hiss", "bark_11_sibilance", "bark_12_hiss"} and difference > 2.0:
+            diagnostics["potential_issues"].append(f"{name} is high versus reference: possible harshness/hiss")
+        if name in {"rumble", "bark_01_rumble", "mel_01_sub"} and difference > 2.0:
+            diagnostics["potential_issues"].append(f"{name} is high versus reference: possible rumble/handling noise")
+
+    return diagnostics
+
+
+def load_reference_profile(folders: Folders, cfg: Dict[str, Any]) -> tuple[Optional[Path], Optional[Dict[str, Any]], Optional[str]]:
+    """Load the configured reference profile and return path/profile/error."""
+    profile_path = resolve_reference_profile_path(folders, cfg)
+    if not profile_path.exists():
+        return profile_path, None, f"EQ match enabled, but reference profile does not exist: {profile_path}"
+    try:
+        with profile_path.open("r", encoding="utf-8") as f:
+            return profile_path, json.load(f), None
+    except json.JSONDecodeError as exc:
+        return profile_path, None, f"Reference profile JSON is invalid: {profile_path}: {exc}"
+
+
+def gain_allowed_by_band(gain: float, band: Dict[str, Any]) -> float:
+    """Apply cut-only/boost-only rules for a band."""
+    if gain > 0 and not bool(band.get("allow_boost", True)):
+        return 0.0
+    if gain < 0 and not bool(band.get("allow_cut", True)):
+        return 0.0
+    return gain
+
+
 def build_eq_match_filters(input_file: Path, folders: Folders, cfg: Dict[str, Any], report: Optional[Dict[str, Any]] = None) -> list[str]:
     """Create capped corrective EQ filters to move a file toward a reference profile.
 
-    The correction is intentionally limited. If a file is very different from the
-    reference, this will improve consistency without forcing extreme boosts/cuts.
+    The correction is intentionally limited and mode-aware. Speech/mel/bark beta
+    modes use per-band guardrails so the app does not boost rumble or hiss just
+    because a reference profile had less of it. That would be mathematically
+    obedient and sonically deranged, so no.
     """
     eq_cfg = cfg.get("eq_match", {})
     if not eq_cfg.get("enabled", False):
         return []
 
-    profile_path = resolve_reference_profile_path(folders, cfg)
-    if not profile_path.exists():
-        message = f"EQ match enabled, but reference profile does not exist: {profile_path}"
+    mode = get_eq_match_mode(cfg)
+    profile_path, reference_profile, error = load_reference_profile(folders, cfg)
+    if error or reference_profile is None:
         if report is not None:
-            report["eq_match"] = {"enabled": True, "status": "skipped", "reason": message}
-        print(message, file=sys.stderr)
+            report["eq_match"] = {"enabled": True, "status": "skipped", "reason": error}
+        print(error, file=sys.stderr)
         return []
 
-    with profile_path.open("r", encoding="utf-8") as f:
-        reference_profile = json.load(f)
-
     current_profile = analyze_eq_profile(input_file, cfg)
-    max_boost = float(eq_cfg.get("max_boost_db", 2.5))
-    max_cut = float(eq_cfg.get("max_cut_db", -3.5))
-    min_change = float(eq_cfg.get("min_change_db", 0.5))
+    before_score = tone_match_score(reference_profile, current_profile, cfg)
+    diagnostics = build_profile_diagnostics(reference_profile, current_profile)
+
+    guardrails = eq_cfg.get("guardrails", {})
+    correction_scale = float(eq_cfg.get("correction_scale", 1.0))
+    avg_diff = before_score.get("average_difference_db") if isinstance(before_score, dict) else None
+    low_confidence = False
+    if guardrails.get("enabled", True) and avg_diff is not None:
+        max_avg = float(guardrails.get("max_average_difference_db", 12.0))
+        if float(avg_diff) > max_avg:
+            low_confidence = True
+            correction_scale *= float(guardrails.get("low_confidence_correction_scale", 0.5))
+
+    global_max_boost = float(eq_cfg.get("max_boost_db", 2.5))
+    global_max_cut = float(eq_cfg.get("max_cut_db", -3.5))
+    global_min_change = float(eq_cfg.get("min_change_db", 0.5))
 
     filters: list[str] = []
     corrections: Dict[str, Any] = {}
@@ -383,10 +638,15 @@ def build_eq_match_filters(input_file: Path, folders: Folders, cfg: Dict[str, An
         if current_db is None or reference_db is None:
             continue
 
-        # If current is lower than reference, gain is positive. If current is
-        # higher than reference, gain is negative. Then cap it for safety.
-        raw_gain = float(reference_db) - float(current_db)
-        gain = clamp(raw_gain, max_cut, max_boost)
+        weight = float(current.get("weight", reference.get("weight", 1.0)) or 1.0)
+        raw_gain = (float(reference_db) - float(current_db)) * correction_scale
+        weighted_gain = raw_gain * float(eq_cfg.get("profile_strength", 1.0))
+        max_boost = float(current.get("max_boost_db", reference.get("max_boost_db", global_max_boost)))
+        max_cut = float(current.get("max_cut_db", reference.get("max_cut_db", global_max_cut)))
+        min_change = float(current.get("min_change_db", reference.get("min_change_db", global_min_change)))
+
+        gain = clamp(weighted_gain, max_cut, max_boost)
+        gain = gain_allowed_by_band(gain, current)
         if abs(gain) < min_change:
             gain = 0.0
 
@@ -395,10 +655,14 @@ def build_eq_match_filters(input_file: Path, folders: Folders, cfg: Dict[str, An
         corrections[name] = {
             "reference_mean_db": reference_db,
             "current_mean_db": current_db,
+            "difference_current_minus_reference_db": round(float(current_db) - float(reference_db), 3),
             "raw_gain_db": round(raw_gain, 3),
+            "weight": weight,
             "applied_gain_db": round(gain, 3),
             "freq": freq,
             "q": q,
+            "allow_boost": bool(current.get("allow_boost", True)),
+            "allow_cut": bool(current.get("allow_cut", True)),
         }
         if gain != 0.0:
             filters.append(f"equalizer=f={freq}:t=q:w={q}:g={gain}")
@@ -407,11 +671,56 @@ def build_eq_match_filters(input_file: Path, folders: Folders, cfg: Dict[str, An
         report["eq_match"] = {
             "enabled": True,
             "status": "applied" if filters else "no_change_needed",
+            "mode": mode,
             "reference_profile": str(profile_path),
+            "before_profile": current_profile,
+            "tone_match_score_before": before_score,
+            "diagnostics_before": diagnostics,
+            "low_confidence": low_confidence,
+            "correction_scale_used": round(correction_scale, 3),
             "corrections": corrections,
         }
 
     return filters
+
+
+def finalize_eq_match_report(output_file: Path, folders: Folders, cfg: Dict[str, Any], report: Dict[str, Any]) -> None:
+    """Analyze processed output and add after-score information to the report."""
+    eq_cfg = cfg.get("eq_match", {})
+    if not eq_cfg.get("enabled", False):
+        return
+    profile_path, reference_profile, error = load_reference_profile(folders, cfg)
+    if error or reference_profile is None:
+        report.setdefault("eq_match", {})["after_status"] = "skipped"
+        report.setdefault("eq_match", {})["after_reason"] = error
+        return
+
+    after_profile = analyze_eq_profile(output_file, cfg)
+    after_score = tone_match_score(reference_profile, after_profile, cfg)
+    diagnostics_after = build_profile_diagnostics(reference_profile, after_profile)
+    eq_report = report.setdefault("eq_match", {})
+    eq_report["after_profile"] = after_profile
+    eq_report["tone_match_score_after"] = after_score
+    eq_report["diagnostics_after"] = diagnostics_after
+
+    before_score = eq_report.get("tone_match_score_before")
+    if isinstance(before_score, dict) and isinstance(after_score, dict):
+        eq_report["score_delta"] = round(float(after_score.get("score", 0)) - float(before_score.get("score", 0)), 1)
+
+
+def analyze_profile_command(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Analyze one file against the current reference profile without processing."""
+    profile = analyze_eq_profile(input_file, cfg)
+    result: Dict[str, Any] = {"file": str(input_file), "mode": get_eq_match_mode(cfg), "profile": profile}
+    profile_path, reference_profile, error = load_reference_profile(folders, cfg)
+    if error or reference_profile is None:
+        result["reference_status"] = "missing_or_invalid"
+        result["reference_error"] = error
+        return result
+    result["reference_profile"] = str(profile_path)
+    result["tone_match_score"] = tone_match_score(reference_profile, profile, cfg)
+    result["diagnostics"] = build_profile_diagnostics(reference_profile, profile)
+    return result
 
 
 def build_pre_loudnorm_filters(cfg: Dict[str, Any], eq_match_filters: Optional[list[str]] = None) -> list[str]:
@@ -675,6 +984,11 @@ def process_file(input_file: Path, folders: Folders, cfg: Dict[str, Any]) -> Opt
 
         report["output_file"] = str(final_output)
         report["output_audio_info"] = get_audio_info(final_output)
+
+        # Version 4 beta: analyze the processed output against the same reference
+        # profile so the report can show before/after tone-match scores.
+        finalize_eq_match_report(final_output, folders, cfg, report)
+
         report["original_archive"] = str(original_copy)
         report["archive_action"] = archive_action
         report["finished_at"] = datetime.now().isoformat(timespec="seconds")
@@ -954,6 +1268,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--batch", action="store_true", help="Process all supported audio files currently in inbox")
     parser.add_argument("--file", help="Process one supported audio file")
     parser.add_argument("--make-reference", help="Analyze one good sermon and save the EQ-match reference profile")
+    parser.add_argument("--analyze-profile", help="Analyze one file against the current EQ reference without processing")
     parser.add_argument("--check", action="store_true", help="Check dependencies and folders")
     args = parser.parse_args(argv)
 
@@ -970,10 +1285,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             for name in ("inbox", "output", "originals", "failed", "reports", "processing", "reference_profiles"):
                 print(f"{name}: {getattr(folders, name)}")
             print(f"EQ reference profile: {resolve_reference_profile_path(folders, cfg)}")
+            print(f"EQ match mode: {get_eq_match_mode(cfg)}")
+            print(f"EQ match bands: {', '.join(get_eq_match_bands(cfg).keys())}")
             return 0
         if args.make_reference:
             profile_path = write_eq_reference_profile(Path(args.make_reference).resolve(), folders, cfg)
             print(f"EQ reference profile written: {profile_path}")
+            print(f"EQ match mode used: {get_eq_match_mode(cfg)}")
+            return 0
+        if args.analyze_profile:
+            result = analyze_profile_command(Path(args.analyze_profile).resolve(), folders, cfg)
+            print(json.dumps(result, indent=2))
             return 0
         if args.file:
             process_file(Path(args.file).resolve(), folders, cfg)
