@@ -733,10 +733,37 @@ def build_pre_loudnorm_filters(cfg: Dict[str, Any], eq_match_filters: Optional[l
     p = cfg["processing"]
     filters: list[str] = []
 
-    hp = p.get("highpass_hz")
-    if hp:
-        # Removes rumble, HVAC thumps, handling noise, and useless sub-bass.
-        filters.append(f"highpass=f={float(hp)}")
+    # Configurable HPF/LPF cleanup.
+    #
+    # HPF = high-pass filter: removes everything below the cutoff. This is useful
+    # for rumble, HVAC thumps, mic stand bumps, and low-frequency junk that does
+    # not help spoken-word intelligibility. The old highpass_hz key is still
+    # supported as a fallback so existing configs do not explode like civilized
+    # software apparently enjoys doing.
+    #
+    # LPF = low-pass filter: removes everything above the cutoff. This is useful
+    # for hiss/air/noise above the speech range. Keep the cutoff fairly high so
+    # consonants do not get dulled.
+    hpf_enabled = bool(p.get("enable_hpf", p.get("enable_highpass", True)))
+    hpf = p.get("hpf_hz", p.get("highpass_hz"))
+
+    lpf_enabled = bool(p.get("enable_lpf", p.get("enable_lowpass", False)))
+    lpf = p.get("lpf_hz", p.get("lowpass_hz"))
+
+    if hpf_enabled and hpf:
+        hpf_value = float(hpf)
+        if hpf_value > 0:
+            filters.append(f"highpass=f={hpf_value}")
+
+    if lpf_enabled and lpf:
+        lpf_value = float(lpf)
+        if lpf_value > 0:
+            if hpf_enabled and hpf and float(hpf) >= lpf_value:
+                raise ProcessingError(
+                    "Invalid HPF/LPF settings: hpf_hz must be lower than lpf_hz. "
+                    "Apparently even filters need boundaries."
+                )
+            filters.append(f"lowpass=f={lpf_value}")
 
     if p.get("enable_noise_reduction", True):
         # Noise Reduction
@@ -757,17 +784,11 @@ def build_pre_loudnorm_filters(cfg: Dict[str, Any], eq_match_filters: Optional[l
             f"equalizer=f={float(p.get('presence_boost_hz', 3500))}:t=q:w={float(p.get('presence_boost_q', 1.0))}:g={float(p.get('presence_boost_db', 1.2))}",
         ])
 
-    if p.get("enable_compression", True):
-        # Gentle leveling before LUFS normalization. Loudnorm does most of the
-        # consistency work; this just tames big spoken-word jumps a little.
-        threshold = p.get("compressor_threshold", "-22dB")
-        ratio = float(p.get("compressor_ratio", 2.2))
-        attack = float(p.get("compressor_attack_ms", 20))
-        release = float(p.get("compressor_release_ms", 250))
-        makeup = float(p.get("compressor_makeup_db", 1.5))
-        filters.append(
-            f"acompressor=threshold={threshold}:ratio={ratio}:attack={attack}:release={release}:makeup={makeup}"
-        )
+    # Stronger beta compression path. This may be a slow leveler plus a firmer
+    # speech compressor, depending on config. Makeup gain is normally left at
+    # unity and handled by the later two-pass loudnorm stage so the final output
+    # reaches the target loudness without relying on guessed compressor makeup.
+    filters.extend(build_compression_filters(cfg))
 
     if p.get("enable_fades", True):
         # Add small clean fades to avoid abrupt starts/stops or MP3 edge clicks.
@@ -801,8 +822,158 @@ def first_pass_loudnorm(input_file: Path, cfg: Dict[str, Any], eq_match_filters:
 
 
 def db_to_linear(db_value: float) -> float:
-    """Convert dBFS limit to the linear value expected by FFmpeg alimiter."""
+    """Convert dBFS/dB gain values to the linear value expected by several FFmpeg filters."""
     return 10 ** (db_value / 20.0)
+
+
+def parse_db_number(value: Any, default: float = 0.0) -> float:
+    """Parse config values that may be numbers or strings like "-24dB".
+
+    Older configs used values such as compressor_threshold: -24dB. The stronger
+    compression controls prefer explicit *_db keys, but this parser keeps both
+    styles working so beta testing does not become archaeology with error logs.
+    """
+    if value is None:
+        return float(default)
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().lower().replace("db", "")
+    try:
+        return float(text)
+    except ValueError:
+        return float(default)
+
+
+def clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    """Read a float from config and clamp it to a safe range."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    return max(minimum, min(maximum, number))
+
+
+def safe_choice(value: Any, allowed: set[str], default: str) -> str:
+    """Return a lower-case config choice only if it is explicitly allowed."""
+    text = str(value or default).strip().lower()
+    return text if text in allowed else default
+
+
+def build_single_compressor_filter(
+    *,
+    prefix: str,
+    p: Dict[str, Any],
+    default_threshold_db: float,
+    default_ratio: float,
+    default_attack_ms: float,
+    default_release_ms: float,
+    default_knee: float,
+    default_mix: float,
+    default_makeup_mode: str,
+) -> str:
+    """Build one FFmpeg acompressor filter from config.
+
+    FFmpeg's acompressor uses linear values for threshold and makeup, while most
+    audio humans think in dB. So this function lets config stay human-readable
+    and converts values before building the filter. Civilization advances one
+    tiny annoyance at a time.
+    """
+    # Prefer the newer explicit *_db keys. Fall back to the older keys where it
+    # makes sense so existing configs keep working.
+    if prefix == "compressor":
+        old_threshold = p.get("compressor_threshold", None)
+        old_makeup = p.get("compressor_makeup_db", 0.0)
+    else:
+        old_threshold = None
+        old_makeup = 0.0
+
+    threshold_db = parse_db_number(
+        p.get(f"{prefix}_threshold_db", old_threshold),
+        default_threshold_db,
+    )
+    ratio = clamp_float(p.get(f"{prefix}_ratio", default_ratio), default_ratio, 1.0, 20.0)
+    attack = clamp_float(p.get(f"{prefix}_attack_ms", default_attack_ms), default_attack_ms, 0.01, 2000.0)
+    release = clamp_float(p.get(f"{prefix}_release_ms", default_release_ms), default_release_ms, 0.01, 9000.0)
+    knee = clamp_float(p.get(f"{prefix}_knee", default_knee), default_knee, 1.0, 8.0)
+    mix = clamp_float(p.get(f"{prefix}_mix", default_mix), default_mix, 0.0, 1.0)
+    level_in_db = parse_db_number(p.get(f"{prefix}_level_in_db", 0.0), 0.0)
+    level_out_db = parse_db_number(p.get(f"{prefix}_level_out_db", 0.0), 0.0)
+
+    detection = safe_choice(p.get(f"{prefix}_detection", "rms"), {"rms", "peak"}, "rms")
+    link = safe_choice(p.get(f"{prefix}_link", "average"), {"average", "maximum"}, "average")
+    mode = safe_choice(p.get(f"{prefix}_mode", "downward"), {"downward", "upward"}, "downward")
+
+    # Makeup strategy:
+    # - loudnorm/auto/off: no fixed compressor makeup. The existing two-pass
+    #   loudnorm stage after compression raises the final file to target LUFS
+    #   while respecting the true-peak ceiling. This is the safest automated
+    #   version of "as loud as the target allows without peaking."
+    # - fixed: use compressor_makeup_db/leveler_makeup_db as a normal fixed gain.
+    makeup_mode = safe_choice(
+        p.get(f"{prefix}_makeup_mode", default_makeup_mode),
+        {"loudnorm", "auto", "off", "fixed"},
+        default_makeup_mode,
+    )
+    if makeup_mode == "fixed":
+        makeup_db = parse_db_number(p.get(f"{prefix}_makeup_db", old_makeup), 0.0)
+        makeup_linear = db_to_linear(makeup_db)
+    else:
+        makeup_linear = 1.0
+
+    return (
+        "acompressor="
+        f"level_in={db_to_linear(level_in_db):.6f}:"
+        f"mode={mode}:"
+        f"threshold={db_to_linear(threshold_db):.6f}:"
+        f"ratio={ratio}:"
+        f"attack={attack}:"
+        f"release={release}:"
+        f"makeup={makeup_linear:.6f}:"
+        f"knee={knee}:"
+        f"link={link}:"
+        f"detection={detection}:"
+        f"mix={mix}"
+        + (f",volume={level_out_db}dB" if abs(level_out_db) > 0.001 else "")
+    )
+
+
+def build_compression_filters(cfg: Dict[str, Any]) -> list[str]:
+    """Build optional one- or two-stage spoken-word compression.
+
+    The default beta path uses a slow, gentle leveler first, then a firmer speech
+    compressor. Both are still followed by two-pass LUFS normalization, so you do
+    not need to guess makeup gain just to hit the podcast loudness target.
+    """
+    p = cfg["processing"]
+    filters: list[str] = []
+
+    if p.get("enable_leveler_compression", False):
+        filters.append(build_single_compressor_filter(
+            prefix="leveler",
+            p=p,
+            default_threshold_db=-30.0,
+            default_ratio=1.6,
+            default_attack_ms=50.0,
+            default_release_ms=700.0,
+            default_knee=4.0,
+            default_mix=1.0,
+            default_makeup_mode="loudnorm",
+        ))
+
+    if p.get("enable_compression", True):
+        filters.append(build_single_compressor_filter(
+            prefix="compressor",
+            p=p,
+            default_threshold_db=-24.0,
+            default_ratio=3.0,
+            default_attack_ms=5.0,
+            default_release_ms=180.0,
+            default_knee=3.0,
+            default_mix=1.0,
+            default_makeup_mode="loudnorm",
+        ))
+
+    return filters
 
 
 def second_pass_process(input_file: Path, output_file: Path, analysis: Dict[str, Any], cfg: Dict[str, Any], eq_match_filters: Optional[list[str]] = None) -> None:

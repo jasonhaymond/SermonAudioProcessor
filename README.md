@@ -17,6 +17,9 @@ New beta features:
 - Speech-focused bands such as rumble, warmth, mud, body, clarity, presence, sibilance, and noise/air.
 - Cut-only rules for bands that should generally not be boosted, such as rumble and noise/air.
 - Per-band boost/cut limits.
+- Configurable HPF/LPF cleanup before denoise, EQ matching, compression, and loudness normalization.
+- Stronger two-stage speech compression controls: optional slow leveler plus main compressor.
+- Safer compressor makeup behavior: default makeup is handled by the later two-pass LUFS normalization instead of guessed fixed gain.
 - Before/after tone-match scoring in each processing report.
 - `--analyze-profile` command for testing one file against the current reference without processing it.
 - Guardrails that reduce correction strength when a file is extremely different from the reference.
@@ -384,6 +387,10 @@ processing:
   true_peak_db: -1.5
   lra: 7.0
   mp3_bitrate: 192k
+  enable_hpf: true
+  hpf_hz: 90
+  enable_lpf: true
+  lpf_hz: 12000
   enable_fades: true
   fade_seconds: 0.5
   archive_move_originals: true
@@ -1015,6 +1022,53 @@ eq_match:
   max_cut_db: -2.5
 ```
 
+## HPF and LPF
+
+The beta includes explicit high-pass and low-pass filters before the rest of the processing chain:
+
+```yaml
+processing:
+  enable_hpf: true
+  hpf_hz: 90
+  enable_lpf: true
+  lpf_hz: 12000
+```
+
+Recommended sermon starting points:
+
+```text
+HPF 80-100 Hz     removes rumble, HVAC thumps, handling noise, and low junk
+LPF 10000-14000 Hz trims hiss/air/noise while preserving speech clarity
+```
+
+If the output sounds thin, lower the HPF:
+
+```yaml
+processing:
+  hpf_hz: 75
+```
+
+If the output sounds dull or muffled, raise the LPF or disable it:
+
+```yaml
+processing:
+  lpf_hz: 14000
+```
+
+```yaml
+processing:
+  enable_lpf: false
+```
+
+If the output still has hiss, try a lower LPF before increasing noise reduction:
+
+```yaml
+processing:
+  lpf_hz: 10000
+```
+
+The app still accepts the older `highpass_hz` setting as a fallback, but the beta config uses `enable_hpf` and `hpf_hz` so the controls are clearer. Because apparently abbreviations make audio engineering feel more official.
+
 ## EQ
 
 If speech sounds boomy or muddy, increase the mud cut carefully:
@@ -1040,19 +1094,93 @@ processing:
 
 ## Compression
 
-If volume jumps are still too distracting:
+The v4 beta has a stronger, more complete compression section. It can use two stages:
+
+```text
+slow leveler → main speech compressor → loudnorm → limiter
+```
+
+The slow leveler smooths larger long-term level jumps. The main compressor controls normal spoken-word dynamics. Then the two-pass LUFS normalizer brings the file to the final podcast target while respecting the true-peak ceiling. This is safer than guessing a fixed makeup gain, which is how people invent clipping and then act surprised.
+
+Default beta compression:
 
 ```yaml
 processing:
-  compressor_ratio: 2.8
+  enable_leveler_compression: true
+  leveler_threshold_db: -30.0
+  leveler_ratio: 1.6
+  leveler_attack_ms: 50
+  leveler_release_ms: 700
+  leveler_makeup_mode: loudnorm
+
+  enable_compression: true
+  compressor_threshold_db: -24.0
+  compressor_ratio: 3.0
+  compressor_attack_ms: 5
+  compressor_release_ms: 180
+  compressor_knee: 3.0
+  compressor_detection: rms
+  compressor_makeup_mode: loudnorm
 ```
 
-If sermons sound too squeezed or unnatural:
+If volume jumps are still too distracting, raise the main ratio slightly:
 
 ```yaml
 processing:
-  compressor_ratio: 1.8
+  compressor_ratio: 3.5
 ```
+
+If sermons sound too squeezed or unnatural, lower the ratio or disable the slow leveler:
+
+```yaml
+processing:
+  compressor_ratio: 2.2
+  enable_leveler_compression: false
+```
+
+If attacks/transients sound too grabby or unnatural, slow the compressor attack a little:
+
+```yaml
+processing:
+  compressor_attack_ms: 10
+```
+
+If the compression seems to pump between words, lengthen release:
+
+```yaml
+processing:
+  compressor_release_ms: 250
+```
+
+### Compressor makeup gain
+
+The recommended setting is:
+
+```yaml
+processing:
+  compressor_makeup_mode: loudnorm
+```
+
+That means the compressor does **not** add fixed makeup gain. Instead, the later two-pass `loudnorm` stage raises the whole processed file to `target_lufs` while respecting `true_peak_db`. In practical terms, that is the safest automated version of “make it as loud as the target allows without peaking.”
+
+Valid makeup modes:
+
+```text
+loudnorm  recommended; final LUFS normalization handles loudness
+auto      alias for loudnorm
+off       no fixed compressor makeup
+fixed     uses compressor_makeup_db as fixed gain
+```
+
+Only use fixed makeup if you have a specific reason:
+
+```yaml
+processing:
+  compressor_makeup_mode: fixed
+  compressor_makeup_db: 1.5
+```
+
+Be gentle with fixed makeup. The final limiter exists, but using it as a trash compactor for bad gain staging is rude to ears everywhere.
 
 ## Fades
 
@@ -1114,7 +1242,9 @@ metadata:
 - MP3 is lossy. Re-encoding can slightly reduce quality, so keep `originals/`.
 - WAV/W64 originals are ideal sources because they avoid an extra lossy generation before final MP3 output.
 - Do not repeatedly process already-processed MP3s unless needed.
-- The EQ is intentionally conservative. Loudness consistency is the main win.
+- HPF/LPF cleanup happens before denoise, EQ matching, compression, loudness normalization, and limiting.
+- Compressor makeup defaults to `loudnorm`, so final loudness is automated by the two-pass LUFS stage rather than guessed inside the compressor.
+- The EQ is intentionally conservative. Loudness consistency is still the main win.
 - EQ matching can help normalize tone, but it should be tested carefully; aggressive correction can make speech sound unnatural.
 - For your first archive test, process 10-20 sermons from different years/sources and listen before running the full archive.
 - Because originals are moved by default, drop copies into `inbox/` during early testing if you do not want to move your only source files yet.
