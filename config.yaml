@@ -44,8 +44,8 @@ threads:
 #
 # Important: if you change mode, regenerate the reference profile.
 eq_match:
-  enabled: false
-  mode: speech
+  enabled: true
+  mode: mel
   reference_profile: reference_profiles/standard_sermon.json
 
   # Overall strength controls.
@@ -55,8 +55,8 @@ eq_match:
   correction_scale: 1.0
 
   # Global limits used when a band does not define its own tighter limits.
-  max_boost_db: 2.5
-  max_cut_db: -3.5
+  max_boost_db: 8
+  max_cut_db: -8
   min_change_db: 0.5
 
   # Report scoring.
@@ -86,7 +86,7 @@ eq_match:
 
 processing:
   # Podcast-style spoken-word loudness target.
-  target_lufs: -16.0
+  target_lufs: -14.0
 
   # True peak ceiling. Leave headroom so MP3 conversion/playback does not clip.
   true_peak_db: -1.0
@@ -101,12 +101,12 @@ processing:
   # HPF/LPF cleanup before denoise, EQ matching, dynamics, and loudness normalization.
   # HPF removes rumble and handling/room thumps. LPF can reduce hiss/air noise.
   enable_hpf: true
-  hpf_hz: 90
+  hpf_hz: 220
   enable_lpf: true
   lpf_hz: 12000
 
   # Backward compatibility only. New configs should use enable_hpf/hpf_hz above.
-  highpass_hz: 90
+  highpass_hz: 200
 
   # Safe spoken-word EQ. Keep conservative when EQ matching is enabled.
   enable_speech_eq: true
@@ -167,9 +167,9 @@ processing:
   # Loudness is handled later by two-pass loudnorm + limiter.
   enable_compression: true
   compressor_threshold_db: -24.0
-  compressor_ratio: 3.0
-  compressor_attack_ms: 5
-  compressor_release_ms: 180
+  compressor_ratio: 4.0
+  compressor_attack_ms: 1
+  compressor_release_ms: 120
   compressor_knee: 3.0
   compressor_detection: rms
   compressor_link: average
