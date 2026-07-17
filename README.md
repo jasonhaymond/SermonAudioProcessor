@@ -18,8 +18,9 @@ New beta features:
 - Cut-only rules for bands that should generally not be boosted, such as rumble and noise/air.
 - Per-band boost/cut limits.
 - Configurable HPF/LPF cleanup before denoise, EQ matching, compression, and loudness normalization.
-- Stronger two-stage speech compression controls: optional slow leveler plus main compressor.
-- Safer compressor makeup behavior: default makeup is handled by the later two-pass LUFS normalization instead of guessed fixed gain.
+- Stronger dynamics controls: optional downward expander, optional slow leveler, and main compressor.
+- Dynamics mode can run compressor only, expander only, both, or neither while testing.
+- Safer dynamics makeup behavior: default makeup is handled by the later two-pass LUFS normalization instead of guessed fixed gain.
 - Before/after tone-match scoring in each processing report.
 - `--analyze-profile` command for testing one file against the current reference without processing it.
 - Guardrails that reduce correction strength when a file is extremely different from the reference.
@@ -1069,6 +1070,115 @@ processing:
 
 The app still accepts the older `highpass_hz` setting as a fallback, but the beta config uses `enable_hpf` and `hpf_hz` so the controls are clearer. Because apparently abbreviations make audio engineering feel more official.
 
+## Dynamics mode: compressor, expander, both, or off
+
+The beta now has a single dynamics switch so you can test the behavior without deleting settings like a savage:
+
+```yaml
+processing:
+  dynamics_mode: both
+  dynamics_order: expander_then_compressor
+```
+
+Valid modes:
+
+```text
+off         no leveler, expander, or compressor
+compressor  leveler/main compressor only
+expander    expander only
+both        expander + leveler/compressor
+```
+
+Recommended starting point for noisy sermon archives:
+
+```yaml
+processing:
+  dynamics_mode: both
+  dynamics_order: expander_then_compressor
+```
+
+Why this helps: compression and LUFS normalization can make quiet parts louder, including room tone, HVAC, audience movement, and background noise. The downward expander reduces low-level material before the compressor and loudnorm stages get a chance to helpfully make the noise floor more obvious. Audio processing: solving one problem by revealing three others.
+
+## Expander / noise-floor control
+
+The expander uses FFmpeg's `agate` filter as a gentle downward expander. This is not meant to slam the audio shut like a hard gate. It should lightly push down the background between phrases while leaving speech natural.
+
+Default beta expander:
+
+```yaml
+processing:
+  enable_expander: true
+  expander_threshold_db: -42.0
+  expander_ratio: 2.0
+  expander_range_db: -12.0
+  expander_attack_ms: 10
+  expander_release_ms: 350
+  expander_knee: 4.0
+  expander_detection: rms
+  expander_link: average
+  expander_makeup_mode: loudnorm
+```
+
+What the important controls do:
+
+```text
+threshold_db  level below which the expander starts reducing sound
+ratio         how strongly quiet material is pushed down
+range_db      maximum reduction allowed, like a safety cap
+attack_ms     how quickly expansion begins after dropping below threshold
+release_ms    how smoothly it opens back up when speech returns
+knee          softens the transition around the threshold
+```
+
+Safer tuning moves:
+
+```yaml
+# If background noise is still too loud between phrases:
+processing:
+  expander_threshold_db: -39.0
+  expander_range_db: -15.0
+```
+
+```yaml
+# If words, breaths, or sentence endings get chopped:
+processing:
+  expander_threshold_db: -46.0
+  expander_range_db: -8.0
+  expander_release_ms: 500
+```
+
+```yaml
+# If the background pumps unnaturally:
+processing:
+  expander_ratio: 1.5
+  expander_release_ms: 600
+```
+
+Warnings, because apparently the universe charges interest on every audio fix:
+
+- Too high a threshold can cut off quiet words, breath sounds, and sentence endings.
+- Too much range can make the background audibly pump in and out.
+- Too fast a release can chatter between syllables.
+- Too slow a release can leave the start of the next phrase sounding clamped.
+- Expansion does not remove noise under speech. It mostly reduces noise between speech.
+- If the source is very noisy while the pastor is talking, use HPF/LPF, light denoise, and better source capture when possible.
+
+Testing recommendation:
+
+```yaml
+processing:
+  dynamics_mode: expander
+```
+
+Try expander-only first on noisy files. Then try:
+
+```yaml
+processing:
+  dynamics_mode: both
+```
+
+Compare those against compressor-only. The right answer depends on the source. Humanity survives another ambiguity.
+
 ## EQ
 
 If speech sounds boomy or muddy, increase the mud cut carefully:
@@ -1094,13 +1204,13 @@ processing:
 
 ## Compression
 
-The v4 beta has a stronger, more complete compression section. It can use two stages:
+The v4 beta has a stronger, more complete dynamics section. It can use three stages:
 
 ```text
-slow leveler → main speech compressor → loudnorm → limiter
+expander → slow leveler → main speech compressor → loudnorm → limiter
 ```
 
-The slow leveler smooths larger long-term level jumps. The main compressor controls normal spoken-word dynamics. Then the two-pass LUFS normalizer brings the file to the final podcast target while respecting the true-peak ceiling. This is safer than guessing a fixed makeup gain, which is how people invent clipping and then act surprised.
+The expander reduces low-level background noise between phrases. The slow leveler smooths larger long-term level jumps. The main compressor controls normal spoken-word dynamics. Then the two-pass LUFS normalizer brings the file to the final podcast target while respecting the true-peak ceiling. This is safer than guessing fixed makeup gain, which is how people invent clipping and then act surprised.
 
 Default beta compression:
 

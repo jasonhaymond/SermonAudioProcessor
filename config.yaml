@@ -44,7 +44,7 @@ threads:
 #
 # Important: if you change mode, regenerate the reference profile.
 eq_match:
-  enabled: true
+  enabled: false
   mode: speech
   reference_profile: reference_profiles/standard_sermon.json
 
@@ -55,8 +55,8 @@ eq_match:
   correction_scale: 1.0
 
   # Global limits used when a band does not define its own tighter limits.
-  max_boost_db: 6
-  max_cut_db: -12
+  max_boost_db: 2.5
+  max_cut_db: -3.5
   min_change_db: 0.5
 
   # Report scoring.
@@ -71,7 +71,7 @@ eq_match:
   # louder HVAC and thinner pastors.
   guardrails:
     enabled: true
-    max_average_difference_db: 16.0
+    max_average_difference_db: 12.0
     low_confidence_correction_scale: 0.5
 
   # Optional band overrides.
@@ -86,7 +86,7 @@ eq_match:
 
 processing:
   # Podcast-style spoken-word loudness target.
-  target_lufs: -14.0
+  target_lufs: -16.0
 
   # True peak ceiling. Leave headroom so MP3 conversion/playback does not clip.
   true_peak_db: -1.0
@@ -98,17 +98,17 @@ processing:
   sample_rate: 44100
   mp3_bitrate: 192k
 
-  # Safe spoken-word cleanup. Keep this conservative when EQ matching is enabled.
-  # HPF removes low rumble; LPF trims hissy high-frequency junk.
-  # For sermons, these are usually safer than trying to boost/cut every problem
-  # with a bunch of narrow EQ. Shocking, restraint helped.
+  # HPF/LPF cleanup before denoise, EQ matching, dynamics, and loudness normalization.
+  # HPF removes rumble and handling/room thumps. LPF can reduce hiss/air noise.
   enable_hpf: true
-  hpf_hz: 200
+  hpf_hz: 90
   enable_lpf: true
-  lpf_hz: 11000
+  lpf_hz: 12000
 
-  # Backward compatibility note:
-  # older configs used highpass_hz. The app still accepts it if hpf_hz is missing.
+  # Backward compatibility only. New configs should use enable_hpf/hpf_hz above.
+  highpass_hz: 90
+
+  # Safe spoken-word EQ. Keep conservative when EQ matching is enabled.
   enable_speech_eq: true
   mud_cut_hz: 250
   mud_cut_q: 1.0
@@ -120,26 +120,36 @@ processing:
   # Noise reduction.
   # Start around 6-10. Heavy denoise can make speech watery/robotic.
   enable_noise_reduction: true
-  noise_reduction_strength: 8
+  noise_reduction_strength: 9
 
-  # Stronger beta speech compression before loudness normalization.
-  #
-  # Makeup gain note, because audio gain staging apparently needed its own
-  # small government agency:
-  #   compressor_makeup_mode: loudnorm
-  # means the compressor itself does not add fixed makeup gain. The later
-  # two-pass loudnorm stage automatically raises the final file to target_lufs
-  # while respecting true_peak_db. This is safer than guessing a fixed makeup
-  # gain and then clipping/limiting everything into sadness.
-  #
-  # Valid makeup modes:
-  #   loudnorm = default; no fixed makeup, final loudnorm handles loudness
-  #   auto     = alias for loudnorm
-  #   off      = no fixed makeup
-  #   fixed    = use *_makeup_db as fixed compressor makeup
+  # Dynamics mode controls whether the app uses compression, expansion, both, or neither.
+  #   off        = no leveler, expander, or compressor
+  #   compressor = leveler/main compressor only
+  #   expander   = expander only
+  #   both       = expander + leveler/compressor
+  # Recommended for noisy sermon archives: both, with expander_then_compressor.
+  dynamics_mode: both
+  dynamics_order: expander_then_compressor
 
-  # Optional first-stage slow leveler. This smooths larger long-term level jumps
-  # before the main compressor. Disable if sermons start sounding too flattened.
+  # Downward expander / gentle gate.
+  # This helps reduce background noise, room tone, HVAC, and audience noise between phrases
+  # before compression + loudnorm make those quiet parts more obvious.
+  # Warning: too high a threshold or too much range can chop quiet words and make noise pump.
+  enable_expander: true
+  expander_threshold_db: -42.0
+  expander_ratio: 2.0
+  expander_range_db: -12.0
+  expander_attack_ms: 10
+  expander_release_ms: 350
+  expander_knee: 4.0
+  expander_detection: rms
+  expander_link: average
+  expander_makeup_mode: loudnorm
+  expander_makeup_db: 0.0
+
+  # Optional slow leveler before the main compressor.
+  # This gently smooths long-term speech level differences. Leave makeup_mode as loudnorm
+  # so final two-pass loudness normalization handles the actual output level safely.
   enable_leveler_compression: true
   leveler_threshold_db: -30.0
   leveler_ratio: 1.6
@@ -152,19 +162,18 @@ processing:
   leveler_makeup_mode: loudnorm
   leveler_makeup_db: 0.0
 
-  # Main speech compressor. This is intentionally firmer than the earlier
-  # versions but still conservative enough for sermons.
+  # Main spoken-word compressor.
+  # Use this to control normal speech dynamics, not to make the file loud.
+  # Loudness is handled later by two-pass loudnorm + limiter.
   enable_compression: true
-  compressor_threshold_db: -25.0
-  compressor_ratio: 4.0
+  compressor_threshold_db: -24.0
+  compressor_ratio: 3.0
   compressor_attack_ms: 5
-  compressor_release_ms: 110
+  compressor_release_ms: 180
   compressor_knee: 3.0
   compressor_detection: rms
   compressor_link: average
   compressor_mix: 1.0
-  compressor_level_in_db: 0.0
-  compressor_level_out_db: 0.0
   compressor_makeup_mode: loudnorm
   compressor_makeup_db: 0.0
 
